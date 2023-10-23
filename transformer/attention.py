@@ -24,7 +24,7 @@ class PositionEmbedding(nn.Module):
     $PE_{pos, i} = \cos(\frac{pos}{10000^{2i / d_model}})$ if $i$ is odd.
 
     """
-    def __init__(self, d_model: int, max_len: int, device: str ="mps") -> None:
+    def __init__(self, d_model: int, max_len: int, device: str ="cpu") -> None:
         super().__init__(d_model, max_len, device)
         pos_emb = np.array([
             [pos / np.power(10000, (2 * i) / d_model) for i in range(d_model)] 
@@ -64,15 +64,15 @@ class MultiHeadAttention(nn.Module):
         self.fc1 = nn.Linear()
         self.fc2 = nn.Linear()
     """
-    def __init__(self, d_model: int, n_dim: int, n_heads: int, max_len: int, device: str) -> None:
+    def __init__(self, d_model: int, d_k: int, n_heads: int, device: str) -> None:
         super().__init__()
         self.d_model = d_model
-        self.n_dim = n_dim
-        self.w_q = nn.Linear(d_model, n_heads * n_dim)
-        self.w_k = nn.Linear(d_model, n_heads * n_dim)
-        self.w_v = nn.Linear(d_model, n_heads * n_dim)
+        self.d_k = d_k
+        self.w_q = nn.Linear(d_model, n_heads * d_k)
+        self.w_k = nn.Linear(d_model, n_heads * d_k)
+        self.w_v = nn.Linear(d_model, n_heads * d_k)
         self.attention = ScaleDotProductAttention()
-        self.out_layer = nn.Linear(n_heads * n_dim, d_model)
+        self.out_layer = nn.Linear(n_heads * d_k, d_model)
 
     def forward(self, x, attn_mask):
         query = self.w_q(x)
@@ -108,15 +108,15 @@ class FeedForwardNet(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, d_model, max_len, n_layers, d_ffn, device):
+    def __init__(self, d_model, vocab_size, d_k, n_heads, max_len, n_layers, d_ffn, device='cpu'):
         super(Encoder, self).__init__()
-        self.word_emb = nn.Embedding(d_model)
+        self.word_emb = nn.Embedding(vocab_size, d_model, device=device)
         self.pos_emb = PositionEmbedding(d_model, max_len, device)
 
         class EncoderLayer(nn.Module):
             def __init__(self):
                 super(EncoderLayer, self).__init__()
-                self.attention = MultiHeadAttention(d_model)
+                self.attention = MultiHeadAttention(d_model, d_k, n_heads, device)
                 self.ffn = FeedForwardNet(d_model, d_ffn, device)
 
             def forward(self, x, attn_mask):
@@ -139,3 +139,10 @@ class Encoder(nn.Module):
 
         return x, attns
 
+
+if __name__ == "__main__":
+    D_MODEL = 512   # dimension of word embedding
+    D_FFN = 2048    # dimension of feed forward net
+    D_K = 64        # dimension of K, Q, V
+    N_LAYERS = 6    # num of encoder/decoder layers
+    N_HEADS = 8     # num of multi-head attention
