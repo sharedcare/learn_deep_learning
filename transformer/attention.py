@@ -1,7 +1,21 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+
+def get_attn_pad_mask(seq):
+    """
+    Args:
+        seq: [batch_size, seq_len]
+
+    Returns:
+        pad_attn_mask: [batch_size, 1, seq_len]
+
+    """
+    batch_size = seq.size(0)
+    seq_len = seq.size(1)
+    pad_attn_mask = seq.data.eq(0).unsqueeze(1)
+    return pad_attn_mask.expand(batch_size, seq_len, seq_len)
 
 
 class PositionEmbedding(nn.Module):
@@ -24,38 +38,104 @@ class PositionEmbedding(nn.Module):
         return word_vec
 
 
-class Attention(nn.Module):
-    """ Multi-head Self Attention mechnism
-    attention(Q, K, V) = \softmax(\frac{QK^T}{\sqrt{d_k}})V
+class ScaleDotProductAttention(nn.Module):
+    """
+    Attention(Q, K, V) = \softmax(\frac{QK^T}{\sqrt{d_k}})V
 
     """
-    def __init__(self, d_model: int, n_dim: int, n_heads: int, max_len: int) -> None:
-        super().__init__(d_model, n_dim, n_heads, max_len)
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, Q, K, V, attn_mask):
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1))
+        # Scale
+        attention_scores /= torch.sqrt(self.d_k)
+        # Mask
+        attention_scores.masked_fill_(attn_mask, 1e-9)
+
+        attn = nn.Softmax(dim=-1)(attention_scores)
+        context = torch.matmul(attn, V)
+
+        return context, attn
+
+
+class MultiHeadAttention(nn.Module):
+    """ Multi-head Self Attention mechanism
+        self.fc1 = nn.Linear()
+        self.fc2 = nn.Linear()
+    """
+    def __init__(self, d_model: int, n_dim: int, n_heads: int, max_len: int, device: str) -> None:
+        super().__init__()
         self.d_model = d_model
         self.n_dim = n_dim
         self.w_q = nn.Linear(d_model, n_heads * n_dim)
         self.w_k = nn.Linear(d_model, n_heads * n_dim)
         self.w_v = nn.Linear(d_model, n_heads * n_dim)
+        self.attention = ScaleDotProductAttention()
         self.out_layer = nn.Linear(n_heads * n_dim, d_model)
 
-    def forward(self, embed_word_vec, attn_mask) -> torch.Tensor:
-        query = self.w_q(embed_word_vec)
-        key = self.w_k(embed_word_vec)
-        value = self.w_v(embed_word_vec)
+    def forward(self, x, attn_mask):
+        query = self.w_q(x)
+        key = self.w_k(x)
+        value = self.w_v(x)
 
-        attention_scores = torch.matmul(query, key.transpose(1, 0))
-
-        # Scale
-        attention_scores /= torch.sqrt(self.n_dim)
-
-        # Mask (Opt.)
-        attention_scores.masked_fill_(attn_mask)
-
-        attention = nn.Softmax(dim=-1)(attention_scores)
-        context = torch.matmul(attention, value)
+        context, attn = self.attention(query, key, value, attn_mask)
         
         # Add & Norm
-        context += embed_word_vec
+        context += x
         output = nn.LayerNorm(self.out_layer(context))
-        return output, attention
+        return output, attn
+
+
+class FeedForwardNet(nn.Module):
+    """Feed Forward Layer
+    /max(0, x w_1 + b_1) w_2 + b_2
+
+    """
+    def __init__(self, d_model, hidden_dim, device):
+        super().__init__()
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, d_model),
+        )
+        self.device = device
+
+    def forward(self, x):
+        residual = x
+        output = self.ffn(x)
+        return nn.LayerNorm(output + residual)
+
+
+class Encoder(nn.Module):
+    def __init__(self, d_model, max_len, n_layers, d_ffn, device):
+        super(Encoder, self).__init__()
+        self.word_emb = nn.Embedding(d_model)
+        self.pos_emb = PositionEmbedding(d_model, max_len, device)
+
+        class EncoderLayer(nn.Module):
+            def __init__(self):
+                super(EncoderLayer, self).__init__()
+                self.attention = MultiHeadAttention(d_model)
+                self.ffn = FeedForwardNet(d_model, d_ffn, device)
+
+            def forward(self, x, attn_mask):
+                output, attn = self.attention(x, attn_mask)
+                output = self.ffn(output)
+                return output, attn
+
+        self.encoder_layers = nn.ModuleList(
+            [EncoderLayer() for layer in range(n_layers)]
+        )
+
+    def forward(self, x):
+        x = self.word_emb(x)
+        x = self.pos_emb(x)
+        attn_mask = get_attn_pad_mask(x)
+        attns = []
+        for layer in self.encoder_layers:
+            x, attn = layer(x, attn_mask)
+            attns.append(attn)
+
+        return x, attns
 
