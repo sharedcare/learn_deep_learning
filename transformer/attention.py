@@ -1,10 +1,14 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from typing import Tuple, Optional, List
+from torch import Tensor
 
 
-def get_attn_pad_mask(seq):
+def get_padding_mask(seq: np.ndarray) -> Tensor:
     """
+
     Args:
         seq: [batch_size, seq_len]
 
@@ -16,6 +20,21 @@ def get_attn_pad_mask(seq):
     seq_len = seq.size(1)
     pad_attn_mask = seq.data.eq(0).unsqueeze(1)
     return pad_attn_mask.expand(batch_size, seq_len, seq_len)
+
+
+def get_attn_mask(seq: np.ndarray) -> Tensor:
+    """
+
+    Args:
+        seq: [batch_size, seq_len]
+
+    Returns:
+
+    """
+    batch_size = seq.size(0)
+    seq_len = seq.size(1)
+    subseq_mask = torch.triu(torch.ones([batch_size, seq_len, seq_len]), diagonal=1)
+    return subseq_mask
 
 
 class PositionEmbedding(nn.Module):
@@ -34,7 +53,7 @@ class PositionEmbedding(nn.Module):
         pos_emb[:, 1::2] = np.cos(pos_emb[:, 1::2])
         self.pos_table = torch.FloatTensor(pos_emb, device=device).unsqueeze(0)  # (1, max_len, d_model)
 
-    def forward(self, word_vec: torch.Tensor):
+    def forward(self, word_vec: Tensor) -> Tensor:
         word_vec += self.pos_table[:, :word_vec.size(1)]
         return word_vec
 
@@ -45,10 +64,10 @@ class ScaleDotProductAttention(nn.Module):
 
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super(ScaleDotProductAttention, self).__init__()
 
-    def forward(self, Q, K, V, attn_mask):
+    def forward(self, Q: Tensor, K: Tensor, V: Tensor, attn_mask: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:
         attention_scores = torch.matmul(Q, K.transpose(-2, -1))
         # Scale
         attention_scores /= torch.sqrt(self.d_k)
@@ -78,16 +97,16 @@ class MultiHeadAttention(nn.Module):
         self.out_layer = nn.Linear(n_heads * d_k, d_model)
         self.to(device)
 
-    def forward(self, x, attn_mask):
-        query = self.w_q(x)
-        key = self.w_k(x)
-        value = self.w_v(x)
+    def forward(self, q: Tensor, k: Tensor, v: Tensor, attn_mask: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:
+        query = self.w_q(q)
+        key = self.w_k(k)
+        value = self.w_v(v)
 
         context, attn = self.attention(query, key, value, attn_mask)
 
         # Add & Norm
-        context += x
-        output = nn.LayerNorm(self.out_layer(context))
+        context += q
+        output = nn.LayerNorm(self.d_mode)(self.out_layer(context))
         return output, attn
 
 
@@ -97,8 +116,9 @@ class FeedForwardNet(nn.Module):
 
     """
 
-    def __init__(self, d_model, hidden_dim, device):
+    def __init__(self, d_model: int, hidden_dim: int, device: Optional[str] = "cpu") -> None:
         super(FeedForwardNet, self).__init__()
+        self.d_model = d_model
         self.ffn = nn.Sequential(
             nn.Linear(d_model, hidden_dim),
             nn.ReLU(),
@@ -106,26 +126,26 @@ class FeedForwardNet(nn.Module):
         )
         self.device = device
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         residual = x
         output = self.ffn(x)
-        return nn.LayerNorm(output + residual)
+        return nn.LayerNorm(self.d_model)(output + residual)
 
 
 class Encoder(nn.Module):
-    def __init__(self, d_model, vocab_size, d_k, n_heads, max_len, n_layers, d_ffn, device='cpu'):
+    def __init__(self, d_model: int, vocab_size: int, d_k: int, n_heads: int, max_len: int, n_layers: int, d_ffn: int, device: Optional[str] = 'cpu') -> None:
         super(Encoder, self).__init__()
         self.word_emb = nn.Embedding(vocab_size, d_model, device=device)
         self.pos_emb = PositionEmbedding(d_model, max_len, device)
 
         class EncoderLayer(nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super(EncoderLayer, self).__init__()
                 self.attention = MultiHeadAttention(d_model, d_k, n_heads, device)
                 self.ffn = FeedForwardNet(d_model, d_ffn, device)
 
-            def forward(self, x, attn_mask):
-                output, attn = self.attention(x, attn_mask)
+            def forward(self, x: Tensor, padding_mask: Tensor) -> Tuple[Tensor, Tensor]:
+                output, attn = self.attention(x, x, x, padding_mask)
                 output = self.ffn(output)
                 return output, attn
 
@@ -133,16 +153,69 @@ class Encoder(nn.Module):
             [EncoderLayer() for layer in range(n_layers)]
         )
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tuple[Tensor, List[Tensor]]:
         x = self.word_emb(x)
         x = self.pos_emb(x)
-        attn_mask = get_attn_pad_mask(x)
+        padding_mask = get_padding_mask(x)
         attns = []
         for layer in self.encoder_layers:
-            x, attn = layer(x, attn_mask)
+            x, attn = layer(x, padding_mask)
             attns.append(attn)
 
         return x, attns
+
+
+class Decoder(nn.Module):
+    def __init__(self, d_model: int, vocab_size: int, d_k: int, n_heads: int, max_len: int, n_layers: int, d_ffn: int, device: Optional[str] = 'cpu') -> None:
+        super(Decoder, self).__init__()
+        self.word_emb = nn.Embedding(vocab_size, d_model, device=device)
+        self.pos_emb = PositionEmbedding(d_model, max_len, device)
+
+        class DecoderLayer(nn.Module):
+            def __init__(self) -> None:
+                super(DecoderLayer, self).__init__()
+                self.masked_attention = MultiHeadAttention(d_model, d_k, n_heads, device)
+                self.attention = MultiHeadAttention(d_model, d_k, n_heads, device)
+                self.ffn = FeedForwardNet(d_model, d_ffn, device)
+
+            def forward(self, x: Tensor, enc_out: Tensor, padding_mask: Tensor, attn_mask: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+                output, masked_attn = self.attention(x, x, x, attn_mask)
+                output, attn = self.attention(output, enc_out, enc_out, padding_mask)
+                output = self.ffn(output)
+                return output, masked_attn, attn
+
+        self.decoder_layers = nn.ModuleList(
+            [DecoderLayer() for layer in range(n_layers)]
+        )
+        self.output_layer = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x: Tensor, enc_outs: Tensor) -> Tuple[Tensor, List[Tensor], List[Tensor]]:
+        x = self.word_emb(x)
+        x = self.pos_emb(x)
+        padding_mask = get_padding_mask(x)
+        attn_mask = get_attn_mask(x)
+        self_attns = []
+        enc_attns = []
+        for layer in self.decoder_layers:
+            x, masked_attn, attn = layer(x, enc_outs, padding_mask, attn_mask)
+            self_attns.append(masked_attn)
+            enc_attns.append(attn)
+
+        output = self.output_layer(x)
+        output = nn.Softmax(dim=-1)(output)
+        return output, self_attns, enc_attns
+
+
+class Transformer(nn.Module):
+    def __init__(self, d_model: int, vocab_size: int, d_k: int, n_heads: int, max_len: int, n_layers: int, d_ffn: int, device: Optional[str] = 'cpu') -> None:
+        super(Transformer, self).__init__()
+        self.encoder = Encoder(d_model, vocab_size, d_k, n_heads, max_len, n_layers, d_ffn, device)
+        self.decoder = Decoder(d_model, vocab_size, d_k, n_heads, max_len, n_layers, d_ffn, device)
+
+    def forward(self, enc_inputs: Tensor, dec_inputs: Tensor) -> Tuple[Tensor, List[Tensor], List[Tensor], List[Tensor]]:
+        enc_outs, enc_attns = self.encoder(enc_inputs)
+        dec_preds, dec_attns, dec_enc_attns = self.decoder(dec_inputs, enc_outs)
+        return dec_preds, enc_attns, dec_attns, dec_enc_attns
 
 
 if __name__ == "__main__":
@@ -151,3 +224,7 @@ if __name__ == "__main__":
     D_K = 64  # dimension of K, Q, V
     N_LAYERS = 6  # num of encoder/decoder layers
     N_HEADS = 8  # num of multi-head attention
+
+    transformer = Transformer(D_MODEL, 1024, D_K, N_HEADS, 512, N_LAYERS, D_FFN)
+    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    optimizer = optim.Adam(transformer.parameters(), lr=1e-3)
