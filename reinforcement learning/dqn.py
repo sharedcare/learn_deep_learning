@@ -1,3 +1,4 @@
+import sys
 import random
 import math
 import torch
@@ -10,7 +11,9 @@ from torch import Tensor
 from collections import deque, namedtuple
 from typing import List, Tuple, Optional
 
-from utils.device import get_device
+sys.path.append('../')
+
+from utils import get_device
 
 
 class ReplayBuffer(object):
@@ -49,17 +52,19 @@ class Net(nn.Module):
 
 class DQN:
     def __init__(self,
+                 env: gym.Env,
                  num_states: int,
                  num_actions: int,
                  hidden_dim: int,
                  eps_start: float,
                  eps_end: float,
                  eps_decay: int,
+                 gamma: float,
                  mem_capacity: int,
                  batch_size: int,
                  device: torch.device = "cpu") -> None:
         super(DQN, self).__init__()
-        self.env = gym.make("cartpole")
+        self.env = env
         self.policy_net = Net(num_states, num_actions, hidden_dim)
         self.target_net = Net(num_states, num_actions, hidden_dim)
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -70,6 +75,7 @@ class DQN:
         self.eps_start = eps_start
         self.eps_end = eps_end
         self.eps_decay = eps_decay
+        self.gamma = gamma
 
         self.replay_buffer = ReplayBuffer(mem_capacity)
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=1e-3)
@@ -88,8 +94,9 @@ class DQN:
 
     def step(self, obs) -> Tuple[Optional[Tensor], Tensor, Tensor, Tensor]:
         action = self.act(obs)
-        next_obs, reward, done, info = self.env.step(action.item())
+        next_obs, reward, terminated, truncated, info = self.env.step(action.item())
         reward = torch.tensor([reward], device=self.device)
+        done = terminated or truncated
         if done:
             next_obs = None
         else:
@@ -122,7 +129,7 @@ class DQN:
         next_state_values = torch.max(self.target_net(non_terminal_next_state_batch), 1)[0]
 
         # Expected Q(s,a): r + \gamma V(s_{t+1}) using Bellman equation
-        expected_state_action_values = reward_batch + gamma * next_state_values
+        expected_state_action_values = reward_batch + self.gamma * next_state_values
 
         # TD error: Q(s_t, a) - Expected Q(s, a)
         criterion = nn.SmoothL1Loss()
@@ -156,18 +163,20 @@ if __name__ == "__main__":
     NUM_EPISODES = 500          # number of episodes for sampling and training
     HIDDEN_DIM = 128            # hidden dimension size for Q-network
 
-    env = gym.make("CartPole-v1").unwrapped
-    n_states = env.observation_space.shape[0]
-    n_actions = env.action_space.n
+    gym_env = gym.make("CartPole-v1").unwrapped
+    n_states = gym_env.observation_space.shape[0]
+    n_actions = gym_env.action_space.n
 
     run_device = get_device()
 
-    dqn = DQN(num_states=n_states,
+    dqn = DQN(env=gym_env,
+              num_states=n_states,
               num_actions=n_actions,
               hidden_dim=HIDDEN_DIM,
               eps_start=EPSILON_START,
               eps_end=EPSILON_END,
               eps_decay=EPSILON_DECAY,
+              gamma=GAMMA,
               mem_capacity=MEMORY_CAPACITY,
               batch_size=BATCH_SIZE,
               device=run_device,
