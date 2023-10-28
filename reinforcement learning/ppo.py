@@ -145,3 +145,15 @@ class PPO:
         else:
             return action.item(), action_logprobs, value
 
+    def compute_returns(self, last_state, values, rewards, dones):
+        """ GAE """
+        last_values = self.actor_critic.evaluate(last_state)
+        advantage = 0
+        advantages = torch.zeros_like(rewards)
+        for step in reversed(range(len(rewards))):
+            delta = rewards[step] + self.gamma * last_values - values[step]     # td error
+            advantage = delta + self.gamma * self.lam * advantage
+            advantages[step] = advantage
+
+        return advantages
+
