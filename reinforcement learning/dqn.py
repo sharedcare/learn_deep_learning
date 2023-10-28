@@ -213,7 +213,7 @@ if __name__ == "__main__":
     TAU = 0.005                 # target network soft update rate
     LR = 1e-4                   # learning rate
     MEMORY_CAPACITY = 3000      # replay buffer memory capacity
-    NUM_EPISODES = 500         # number of episodes for sampling and training
+    NUM_EPISODES = 500          # number of episodes for sampling and training
     HIDDEN_DIM = 128            # hidden dimension size for Q-network
 
     LOAD_MODEL_PATH = "saved_models/rl/dqn.pt"
