@@ -1,5 +1,8 @@
-from collections import namedtuple, deque
+from collections import namedtuple
+from typing import Tuple, Optional
+from torch import Tensor
 from torch.distributions import MultivariateNormal, Categorical
+from utils import get_device, plot_rewards
 
 import random
 import torch
@@ -14,7 +17,7 @@ class ReplayBuffer:
     
     """
     Transition = namedtuple('Transition',
-                            ('state', 'action', 'logprobs', 'reward', 'next_state'))
+                            ('state', 'action', 'logprobs', 'reward', 'value', 'next_state'))
 
     def __init__(self, device="cpu") -> None:
         self.mem = []
@@ -106,6 +109,7 @@ class ActorCritic(nn.Module):
 
 class PPO:
     def __init__(self,
+                 env: gym.Env,
                  num_states,
                  num_actions,
                  hidden_dim,
@@ -120,6 +124,7 @@ class PPO:
                  lam,
                  max_grad_norm,
                  device="cpu"):
+        self.env = env
         self.device = device
         self.continuous_action = continuous_action
         self.replay_buffer = ReplayBuffer()
@@ -145,6 +150,26 @@ class PPO:
         else:
             return action.item(), action_logprobs, value
 
+    def step(self, obs: Tensor) -> Tuple[Optional[Tensor], Tensor, Tensor, Tensor, bool]:
+        """rollout one step"""
+        action, logprob, value = self.act(obs)
+        next_obs, reward, terminated, truncated, info = self.env.step(action)
+        reward = torch.tensor([reward], device=self.device)
+        done = terminated or truncated
+        if done:
+            next_obs = None
+        else:
+            next_obs = torch.tensor(next_obs, device=self.device).unsqueeze(0)
+
+        self.replay_buffer.push(obs, action, logprob, reward, value, next_obs)
+        return next_obs, action, reward, value, done
+
+    def reset(self) -> Tensor:
+        """env reset"""
+        obs, info = self.env.reset()
+        obs = torch.tensor(obs, device=self.device)
+        return obs.unsqueeze(0)
+
     def compute_returns(self, last_state, values, rewards, dones):
         """ GAE """
         last_values = self.actor_critic.evaluate(last_state)
@@ -156,4 +181,45 @@ class PPO:
             advantages[step] = advantage
 
         return advantages
+
+    def update(self):
+        sample = self.replay_buffer.sample()
+        batch = self.replay_buffer.Transition(*zip(*sample))
+
+        state_batch = torch.cat(batch.state)
+        action_batch = torch.cat(batch.action)
+        action_logprobs_batch = torch.cat(batch.logprobs)
+        reward_batch = torch.cat(batch.reward)
+        value_batch = torch.cat(batch.value)
+        next_state_batch = torch.cat(batch.next_state)
+        done_batch = torch.cat([torch.tensor(False, device=self.device)
+                                if ns is None else torch.tensor(True, device=self.device) for ns in batch.next_state])
+
+        advantages = self.compute_returns(state_batch[:, -1], value_batch, reward_batch, done_batch)
+
+        for i in range(self.num_learning_epochs):
+            pass
+
+    def learn(self, num_episodes):
+        """training process"""
+        # rollout
+        episode_durations = []
+        for i in range(num_episodes):
+            done = False
+            episode_rewards = 0
+            state = self.reset()
+            duration = 0
+            while not done:
+                next_state, action, reward, value, done = self.step(state)
+                episode_rewards += reward.item()
+                state = next_state
+                self.update()
+                duration += 1
+
+            episode_durations.append(duration + 1)
+            print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
+            plot_rewards(show_result=False, episode_durations=episode_durations)
+
+        plot_rewards(show_result=True, episode_durations=episode_durations)
+
 
