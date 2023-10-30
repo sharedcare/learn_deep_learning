@@ -118,7 +118,7 @@ class DQN:
         else:
             return torch.tensor([[self.env.action_space.sample()]], device=self.device)
 
-    def step(self, obs) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
+    def step(self, obs: Tensor) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
         """rollout one step"""
         action = self.act(obs)
         next_obs, reward, terminated, truncated, info = self.env.step(action.item())
