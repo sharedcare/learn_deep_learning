@@ -8,6 +8,7 @@ import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
 import gym
 
@@ -150,6 +151,14 @@ class PPO:
         else:
             return action.item(), action_logprobs, value
 
+    def evaluate(self, state, action):
+        _, _ = self.actor_critic.act(state)
+        value = self.actor_critic.evaluate(state)
+        action_logprob = self.actor_critic.distribution.log_prob(action)
+        entropy = self.actor_critic.entropy()
+
+        return action_logprob, value, entropy
+
     def step(self, obs: Tensor) -> Tuple[Optional[Tensor], Tensor, Tensor, Tensor, bool]:
         """rollout one step"""
         action, logprob, value = self.act(obs)
@@ -198,7 +207,28 @@ class PPO:
         advantages = self.compute_returns(state_batch[:, -1], value_batch, reward_batch, done_batch)
 
         for i in range(self.num_learning_epochs):
-            pass
+            action_logprobs, values, entropy = self.evaluate(state_batch, action_batch)
+
+            # ratio = (pi_theta / pi_theta_old)
+            ratios = torch.exp(action_logprobs - action_logprobs_batch.detach())
+
+            # surrogate loss
+            surrogate = -ratios * advantages
+            surrogate_clipped = -torch.clamp(ratios, 1 - self.clip_param, 1 + self.clip_param)
+            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+            # value loss
+            value_loss = self.value_loss_coef * F.mse_loss(values, returns).mean()
+
+            # entropy loss
+            entropy_loss = self.entropy_coef * entropy.mean()
+
+            loss = surrogate_loss + value_loss - entropy_loss
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            self.optimizer.step()
 
     def learn(self, num_episodes):
         """training process"""
