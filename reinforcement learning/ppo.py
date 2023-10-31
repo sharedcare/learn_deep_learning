@@ -20,21 +20,24 @@ class ReplayBuffer:
     Transition = namedtuple('Transition',
                             ('state', 'action', 'logprobs', 'reward', 'value', 'next_state'))
 
-    def __init__(self, device="cpu") -> None:
+    def __init__(self, device: str = "cpu") -> None:
         self.mem = []
         self.count = 0
 
-    def push(self, *transition):
+    def push(self, *transition: Tensor):
         """ save transition to buffer """
         self.mem.append(self.Transition(*transition))
         self.count += 1
 
-    def sample(self, batch_size=None):
+    def sample(self, batch_size: int = None) -> list:
         """ sample transitions from memory buffer """
         if batch_size is None:
             return self.Transition(*zip(*self.mem))
         else:
             return self.Transition(*zip(*random.sample(self.mem, batch_size)))
+        
+    def clear(self) -> None:
+        self.mem = []
 
     def __len__(self) -> int:
         return len(self.mem)
@@ -42,12 +45,12 @@ class ReplayBuffer:
 
 class ActorCritic(nn.Module):
     def __init__(self,
-                 num_states,
-                 num_actions,
-                 hidden_dim,
-                 init_noise_std=1.0,
-                 continuous_action=False
-                 ):
+                 num_states: int,
+                 num_actions: int,
+                 hidden_dim: int,
+                 init_noise_std: float = 1.0,
+                 continuous_action: bool = False
+                 ) -> None:
         super(ActorCritic, self).__init__()
         self.continuous_action = continuous_action
         if continuous_action:
@@ -84,14 +87,14 @@ class ActorCritic(nn.Module):
         raise NotImplementedError
 
     @property
-    def action_std(self):
+    def action_std(self) -> Tensor:
         return self.distribution.stddev
 
     @property
-    def entropy(self):
+    def entropy(self) -> Tensor:
         return self.distribution.entropy().sum(dim=-1)
 
-    def act(self, obs):
+    def act(self, obs: Tensor) -> Tuple[Tensor, Tensor]:
         if self.continuous_action:
             action_mean = self.actor(obs)
             self.distribution = MultivariateNormal(action_mean, action_mean * 0. + self.std)
@@ -103,7 +106,7 @@ class ActorCritic(nn.Module):
         action_logprobs = self.distribution.log_prob(action)
         return action, action_logprobs
 
-    def evaluate(self, obs):
+    def evaluate(self, obs: Tensor) -> Tensor:
         value = self.critic(obs)
         return value
 
@@ -111,20 +114,20 @@ class ActorCritic(nn.Module):
 class PPO:
     def __init__(self,
                  env: gym.Env,
-                 num_states,
-                 num_actions,
-                 hidden_dim,
-                 learning_rate,
-                 continuous_action,
-                 clip_param,
-                 value_clip_param,
-                 num_learning_epochs,
-                 value_loss_coef,
-                 entropy_coef,
-                 gamma,
-                 lam,
-                 max_grad_norm,
-                 device="cpu"):
+                 num_states: int,
+                 num_actions: int,
+                 hidden_dim: int,
+                 learning_rate: float,
+                 continuous_action: bool,
+                 clip_param: float,
+                 value_clip_param: float,
+                 num_learning_epochs: int,
+                 value_loss_coef: float,
+                 entropy_coef: float,
+                 gamma: float,
+                 lam: float,
+                 max_grad_norm: float,
+                 device: str = "cpu") -> None:
         self.env = env
         self.device = device
         self.continuous_action = continuous_action
@@ -142,7 +145,17 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = value_clip_param
 
-    def act(self, state):
+    def save(self, path: str) -> None:
+        """save model to designated path"""
+        torch.save(self.actor_critic.state_dict(), path)
+        print("model saved at: {}".format(path))
+
+    def load(self, path: str) -> None:
+        """load network from path"""
+        self.actor_critic.load_state_dict(torch.load(path))
+        print("model loaded from: {}".format(path))
+
+    def act(self, state: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         action, action_logprobs = self.actor_critic.act(state)
         value = self.actor_critic.evaluate(state)
         # self.replay_buffer.push(state, action, action_logprobs)
@@ -151,7 +164,7 @@ class PPO:
         else:
             return action.item(), action_logprobs, value
 
-    def evaluate(self, state, action):
+    def evaluate(self, state: Tensor, action: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         _, _ = self.actor_critic.act(state)
         value = self.actor_critic.evaluate(state)
         action_logprob = self.actor_critic.distribution.log_prob(action)
@@ -179,7 +192,7 @@ class PPO:
         obs = torch.tensor(obs, device=self.device)
         return obs.unsqueeze(0)
 
-    def compute_returns(self, last_state, values, rewards, dones):
+    def compute_returns(self, last_state: Tensor, values: Tensor, rewards: Tensor, dones: Tensor) -> Tensor:
         """ GAE """
         last_values = self.actor_critic.evaluate(last_state)
         advantage = 0
@@ -191,7 +204,7 @@ class PPO:
 
         return advantages
 
-    def update(self):
+    def update(self) -> None:
         sample = self.replay_buffer.sample()
         batch = self.replay_buffer.Transition(*zip(*sample))
 
@@ -230,7 +243,9 @@ class PPO:
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
-    def learn(self, num_episodes):
+        self.replay_buffer.clear()
+
+    def learn(self, num_episodes: int) -> None:
         """training process"""
         # rollout
         episode_durations = []
@@ -252,4 +267,22 @@ class PPO:
 
         plot_rewards(show_result=True, episode_durations=episode_durations)
 
+
+if __name__ == "__main__":
+    BATCH_SIZE = 128                # sample batch size
+    GAMMA = 0.99                    # reward discount
+    LAMBDA = 0.005                  # adv rate
+    LR = 1e-4                       # learning rate
+    NUM_EPISODES = 500              # number of episodes for sampling and training
+    NUM_LEARNING_EPOCHS = 8         # number of epochs for ppo update
+    CLIP_PARAM = 0.2                # clip factor for ppo clip
+
+    LOAD_MODEL_PATH = "saved_models/rl/ppo.pt"
+    SAVE_MODEL_PATH = "saved_models/rl/new_ppo.pt"
+
+    gym_env = gym.make("CartPole-v1").unwrapped
+    n_states = gym_env.observation_space.shape[0]
+    n_actions = gym_env.action_space.n
+
+    run_device = get_device()
 
