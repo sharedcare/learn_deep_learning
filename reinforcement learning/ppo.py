@@ -35,7 +35,7 @@ class ReplayBuffer:
             return self.Transition(*zip(*self.mem))
         else:
             return self.Transition(*zip(*random.sample(self.mem, batch_size)))
-        
+
     def clear(self) -> None:
         self.mem = []
 
@@ -127,7 +127,7 @@ class PPO:
                  gamma: float,
                  lam: float,
                  max_grad_norm: float,
-                 device: str = "cpu") -> None:
+                 device: torch.device = "cpu") -> None:
         self.env = env
         self.device = device
         self.continuous_action = continuous_action
@@ -192,17 +192,25 @@ class PPO:
         obs = torch.tensor(obs, device=self.device)
         return obs.unsqueeze(0)
 
-    def compute_returns(self, last_state: Tensor, values: Tensor, rewards: Tensor, dones: Tensor) -> Tensor:
+    def compute_returns(self, last_state: Tensor, values: Tensor,
+                        rewards: Tensor, dones: Tensor) -> Tuple[Tensor, Tensor]:
         """ GAE """
         last_values = self.actor_critic.evaluate(last_state)
         advantage = 0
         advantages = torch.zeros_like(rewards)
+        returns = torch.zeros_like(rewards)
         for step in reversed(range(len(rewards))):
-            delta = rewards[step] + self.gamma * last_values - values[step]     # td error
-            advantage = delta + self.gamma * self.lam * advantage
+            if step == len(rewards) - 1:
+                next_values = last_values
+            else:
+                next_values = values[step + 1]
+            next_non_terminal = 1.0 - dones[step]
+            delta = rewards[step] + next_non_terminal * self.gamma * last_values - values[step]  # td error
+            advantage = delta + next_non_terminal * self.gamma * self.lam * advantage  # advantage
+            returns[step] = advantage + values[step]  # td target
             advantages[step] = advantage
 
-        return advantages
+        return advantages, returns
 
     def update(self) -> None:
         sample = self.replay_buffer.sample()
@@ -217,7 +225,7 @@ class PPO:
         done_batch = torch.cat([torch.tensor(False, device=self.device)
                                 if ns is None else torch.tensor(True, device=self.device) for ns in batch.next_state])
 
-        advantages = self.compute_returns(state_batch[:, -1], value_batch, reward_batch, done_batch)
+        advantages, returns = self.compute_returns(state_batch[:, -1], value_batch, reward_batch, done_batch)
 
         for i in range(self.num_learning_epochs):
             action_logprobs, values, entropy = self.evaluate(state_batch, action_batch)
@@ -269,13 +277,16 @@ class PPO:
 
 
 if __name__ == "__main__":
-    BATCH_SIZE = 128                # sample batch size
-    GAMMA = 0.99                    # reward discount
-    LAMBDA = 0.005                  # adv rate
-    LR = 1e-4                       # learning rate
-    NUM_EPISODES = 500              # number of episodes for sampling and training
-    NUM_LEARNING_EPOCHS = 8         # number of epochs for ppo update
-    CLIP_PARAM = 0.2                # clip factor for ppo clip
+    BATCH_SIZE = 128  # sample batch size
+    GAMMA = 0.99  # reward discount
+    LAMBDA = 0.005  # adv rate
+    LR = 1e-4  # learning rate
+    NUM_EPISODES = 500  # number of episodes for sampling and training
+    NUM_LEARNING_EPOCHS = 8  # number of epochs for ppo update
+    CLIP_PARAM = 0.2  # clip factor for ppo clip
+    HIDDEN_DIM = 128  # hidden dimension size for actor-critic network
+    VALUE_LOSS_COEF = 0.5  # value loss coefficient
+    ENTROPY_LOSS_COEF = 0.01  # entropy loss coefficient
 
     LOAD_MODEL_PATH = "saved_models/rl/ppo.pt"
     SAVE_MODEL_PATH = "saved_models/rl/new_ppo.pt"
@@ -284,5 +295,28 @@ if __name__ == "__main__":
     n_states = gym_env.observation_space.shape[0]
     n_actions = gym_env.action_space.n
 
+    if isinstance(gym_env, gym.spaces.Discrete):
+        is_continuous_action = False
+    else:
+        is_continuous_action = True
+
     run_device = get_device()
 
+    ppo = PPO(gym_env,
+              n_states,
+              n_actions,
+              HIDDEN_DIM,
+              LR,
+              is_continuous_action,
+              CLIP_PARAM,
+              CLIP_PARAM,
+              NUM_LEARNING_EPOCHS,
+              VALUE_LOSS_COEF,
+              ENTROPY_LOSS_COEF,
+              GAMMA,
+              LAMBDA,
+              max_grad_norm=1.0,
+              device=run_device,
+              )
+
+    ppo.learn(NUM_EPISODES)
