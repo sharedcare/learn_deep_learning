@@ -29,7 +29,7 @@ class ReplayBuffer:
         self.mem.append(self.Transition(*transition))
         self.count += 1
 
-    def sample(self, batch_size: int = None) -> list:
+    def sample(self, batch_size: int = None) -> Transition:
         """ sample transitions from memory buffer """
         if batch_size is None:
             return self.Transition(*zip(*self.mem))
@@ -49,7 +49,8 @@ class ActorCritic(nn.Module):
                  num_actions: int,
                  hidden_dim: int,
                  init_noise_std: float = 1.0,
-                 continuous_action: bool = False
+                 continuous_action: bool = False,
+                 device: torch.device = "cpu",
                  ) -> None:
         super(ActorCritic, self).__init__()
         self.continuous_action = continuous_action
@@ -82,6 +83,7 @@ class ActorCritic(nn.Module):
 
         self.distribution = None
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        self.to(device)
 
     def forward(self):
         raise NotImplementedError
@@ -118,6 +120,7 @@ class PPO:
                  num_actions: int,
                  hidden_dim: int,
                  learning_rate: float,
+                 episode_length: int,
                  continuous_action: bool,
                  clip_param: float,
                  value_clip_param: float,
@@ -131,8 +134,10 @@ class PPO:
         self.env = env
         self.device = device
         self.continuous_action = continuous_action
+        self.episode_length = episode_length
         self.replay_buffer = ReplayBuffer()
-        self.actor_critic = ActorCritic(num_states, num_actions, hidden_dim, continuous_action)
+        self.actor_critic = ActorCritic(num_states, num_actions, hidden_dim,
+                                        continuous_action=continuous_action, device=device)
         self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
 
         # PPO parameters
@@ -168,7 +173,7 @@ class PPO:
         _, _ = self.actor_critic.act(state)
         value = self.actor_critic.evaluate(state)
         action_logprob = self.actor_critic.distribution.log_prob(action)
-        entropy = self.actor_critic.entropy()
+        entropy = self.actor_critic.entropy
 
         return action_logprob, value, entropy
 
@@ -182,6 +187,8 @@ class PPO:
             next_obs = None
         else:
             next_obs = torch.tensor(next_obs, device=self.device).unsqueeze(0)
+
+        action = torch.tensor(action, device=self.device).unsqueeze(0)
 
         self.replay_buffer.push(obs, action, logprob, reward, value, next_obs)
         return next_obs, action, reward, value, done
@@ -205,27 +212,27 @@ class PPO:
             else:
                 next_values = values[step + 1]
             next_non_terminal = 1.0 - dones[step]
-            delta = rewards[step] + next_non_terminal * self.gamma * last_values - values[step]  # td error
+            delta = rewards[step] + next_non_terminal * self.gamma * next_values - values[step]  # td error
             advantage = delta + next_non_terminal * self.gamma * self.lam * advantage  # advantage
             returns[step] = advantage + values[step]  # td target
             advantages[step] = advantage
+            # normalize the advantages
+            advantages = (advantages - advantages.mean()) / (advantages.std(dim=-1) + 1e-7)
 
         return advantages, returns
 
     def update(self) -> None:
-        sample = self.replay_buffer.sample()
-        batch = self.replay_buffer.Transition(*zip(*sample))
+        batch = self.replay_buffer.sample()
 
         state_batch = torch.cat(batch.state)
         action_batch = torch.cat(batch.action)
         action_logprobs_batch = torch.cat(batch.logprobs)
         reward_batch = torch.cat(batch.reward)
         value_batch = torch.cat(batch.value)
-        next_state_batch = torch.cat(batch.next_state)
-        done_batch = torch.cat([torch.tensor(False, device=self.device)
-                                if ns is None else torch.tensor(True, device=self.device) for ns in batch.next_state])
+        # next_state_batch = torch.cat(batch.next_state)
+        done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state], device=self.device)
 
-        advantages, returns = self.compute_returns(state_batch[:, -1], value_batch, reward_batch, done_batch)
+        advantages, returns = self.compute_returns(state_batch[-1], value_batch, reward_batch, done_batch)
 
         for i in range(self.num_learning_epochs):
             action_logprobs, values, entropy = self.evaluate(state_batch, action_batch)
@@ -244,11 +251,15 @@ class PPO:
             # entropy loss
             entropy_loss = self.entropy_coef * entropy.mean()
 
-            loss = surrogate_loss + value_loss - entropy_loss
+            # loss = surrogate_loss + value_loss - entropy_loss
 
             self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            surrogate_loss.backward(retain_graph=True)
+            # nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+
+            self.optimizer.zero_grad()
+            value_loss.backward()
             self.optimizer.step()
 
         self.replay_buffer.clear()
@@ -258,35 +269,39 @@ class PPO:
         # rollout
         episode_durations = []
         for i in range(num_episodes):
-            done = False
-            episode_rewards = 0
-            state = self.reset()
-            duration = 0
-            while not done:
-                next_state, action, reward, value, done = self.step(state)
-                episode_rewards += reward.item()
-                state = next_state
-                self.update()
-                duration += 1
+            step = 0
+            while step < self.episode_length:
+                done = False
+                episode_rewards = 0
+                state = self.reset()
+                duration = 0
+                while not done:
+                    next_state, action, reward, value, done = self.step(state)
+                    episode_rewards += reward.item()
+                    state = next_state
+                    duration += 1
+                    step += 1
 
-            episode_durations.append(duration + 1)
-            print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
+                episode_durations.append(duration + 1)
+                print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
+            self.update()
             plot_rewards(show_result=False, episode_durations=episode_durations)
 
         plot_rewards(show_result=True, episode_durations=episode_durations)
 
 
 if __name__ == "__main__":
-    BATCH_SIZE = 128  # sample batch size
-    GAMMA = 0.99  # reward discount
-    LAMBDA = 0.005  # adv rate
-    LR = 1e-4  # learning rate
-    NUM_EPISODES = 500  # number of episodes for sampling and training
-    NUM_LEARNING_EPOCHS = 8  # number of epochs for ppo update
-    CLIP_PARAM = 0.2  # clip factor for ppo clip
-    HIDDEN_DIM = 128  # hidden dimension size for actor-critic network
-    VALUE_LOSS_COEF = 0.5  # value loss coefficient
-    ENTROPY_LOSS_COEF = 0.01  # entropy loss coefficient
+    BATCH_SIZE = 128                # sample batch size
+    GAMMA = 0.99                    # reward discount
+    LAMBDA = 0.005                  # adv rate
+    LR = 1e-4                       # learning rate
+    NUM_EPISODES = 500              # number of episodes for sampling and training
+    EPISODE_LEN = 40                # total episode steps for each rollout episode
+    NUM_LEARNING_EPOCHS = 8         # number of epochs for ppo update
+    CLIP_PARAM = 0.2                # clip factor for ppo clip
+    HIDDEN_DIM = 128                # hidden dimension size for actor-critic network
+    VALUE_LOSS_COEF = 0.5           # value loss coefficient
+    ENTROPY_LOSS_COEF = 0.01        # entropy loss coefficient
 
     LOAD_MODEL_PATH = "saved_models/rl/ppo.pt"
     SAVE_MODEL_PATH = "saved_models/rl/new_ppo.pt"
@@ -295,7 +310,7 @@ if __name__ == "__main__":
     n_states = gym_env.observation_space.shape[0]
     n_actions = gym_env.action_space.n
 
-    if isinstance(gym_env, gym.spaces.Discrete):
+    if isinstance(gym_env.action_space, gym.spaces.Discrete):
         is_continuous_action = False
     else:
         is_continuous_action = True
@@ -307,6 +322,7 @@ if __name__ == "__main__":
               n_actions,
               HIDDEN_DIM,
               LR,
+              EPISODE_LEN,
               is_continuous_action,
               CLIP_PARAM,
               CLIP_PARAM,
