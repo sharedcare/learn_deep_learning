@@ -2,8 +2,9 @@ from collections import namedtuple
 from typing import Tuple, Optional
 from torch import Tensor
 from torch.distributions import MultivariateNormal, Categorical
-from utils import get_device, plot_rewards
 
+import os
+import sys
 import random
 import torch
 import torch.nn as nn
@@ -11,6 +12,10 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 import gym
+
+sys.path.append('./')
+
+from utils import get_device, plot_rewards
 
 
 class ReplayBuffer:
@@ -224,17 +229,18 @@ class PPO:
     def update(self) -> None:
         batch = self.replay_buffer.sample()
 
-        state_batch = torch.cat(batch.state)
-        action_batch = torch.cat(batch.action)
-        action_logprobs_batch = torch.cat(batch.logprobs)
-        reward_batch = torch.cat(batch.reward)
-        value_batch = torch.cat(batch.value)
-        # next_state_batch = torch.cat(batch.next_state)
+        state_batch = torch.cat(batch.state).detach()
+        action_batch = torch.cat(batch.action).detach()
+        action_logprobs_batch = torch.cat(batch.logprobs).detach()
+        reward_batch = torch.cat(batch.reward).detach()
+        value_batch = torch.cat(batch.value).detach()
         done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state], device=self.device)
 
         advantages, returns = self.compute_returns(state_batch[-1], value_batch, reward_batch, done_batch)
+        advantages = advantages.detach()
+        returns = returns.detach()
 
-        for i in range(self.num_learning_epochs):
+        for _ in range(self.num_learning_epochs):
             action_logprobs, values, entropy = self.evaluate(state_batch, action_batch)
 
             # ratio = (pi_theta / pi_theta_old)
@@ -246,20 +252,16 @@ class PPO:
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
             # value loss
-            value_loss = self.value_loss_coef * F.mse_loss(values, returns).mean()
+            value_loss = self.value_loss_coef * F.mse_loss(values.squeeze(-1), returns).mean()
 
             # entropy loss
             entropy_loss = self.entropy_coef * entropy.mean()
 
-            # loss = surrogate_loss + value_loss - entropy_loss
+            loss = surrogate_loss + value_loss - entropy_loss
 
             self.optimizer.zero_grad()
-            surrogate_loss.backward(retain_graph=True)
-            # nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
-            self.optimizer.step()
-
-            self.optimizer.zero_grad()
-            value_loss.backward()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
         self.replay_buffer.clear()
@@ -268,23 +270,27 @@ class PPO:
         """training process"""
         # rollout
         episode_durations = []
+        done = False
+        episode_rewards = 0
+        state = self.reset()
+        duration = 0
         for i in range(num_episodes):
-            step = 0
-            while step < self.episode_length:
-                done = False
-                episode_rewards = 0
-                state = self.reset()
-                duration = 0
-                while not done:
-                    next_state, action, reward, value, done = self.step(state)
-                    episode_rewards += reward.item()
-                    state = next_state
-                    duration += 1
-                    step += 1
+            for _ in range(self.episode_length):
+                next_state, action, reward, value, done = self.step(state)
+                episode_rewards += reward.item()
+                state = next_state
+                duration += 1
+                if done:
+                    state = self.reset()
+                    duration = 0
+                    episode_rewards = 0
+                    done = False
 
-                episode_durations.append(duration + 1)
-                print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
             self.update()
+
+            episode_durations.append(duration + 1)
+            print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
+            
             plot_rewards(show_result=False, episode_durations=episode_durations)
 
         plot_rewards(show_result=True, episode_durations=episode_durations)
@@ -296,7 +302,7 @@ if __name__ == "__main__":
     LAMBDA = 0.005                  # adv rate
     LR = 1e-4                       # learning rate
     NUM_EPISODES = 500              # number of episodes for sampling and training
-    EPISODE_LEN = 40                # total episode steps for each rollout episode
+    EPISODE_LEN = 100               # total episode steps for each rollout episode
     NUM_LEARNING_EPOCHS = 8         # number of epochs for ppo update
     CLIP_PARAM = 0.2                # clip factor for ppo clip
     HIDDEN_DIM = 128                # hidden dimension size for actor-critic network
@@ -335,4 +341,8 @@ if __name__ == "__main__":
               device=run_device,
               )
 
+    if LOAD_MODEL_PATH and os.path.exists(LOAD_MODEL_PATH):
+        ppo.load(LOAD_MODEL_PATH)
     ppo.learn(NUM_EPISODES)
+    if SAVE_MODEL_PATH:
+        ppo.save(SAVE_MODEL_PATH)

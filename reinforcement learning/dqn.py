@@ -11,7 +11,7 @@ from torch import Tensor
 from collections import deque, namedtuple
 from typing import List, Tuple, Optional
 
-sys.path.append('../')
+sys.path.append('./')
 
 from utils import get_device, plot_rewards
 
