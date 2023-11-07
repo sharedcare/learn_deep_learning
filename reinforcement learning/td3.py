@@ -108,15 +108,29 @@ class TD3:
         self.critic = Critic()
         self.target_critic = Critic()
         self.replay_buffer = ReplayBuffer()
+        self.device = device
 
     def act(self, state: Tensor) -> Tensor:
-        action = self.policy_network(state)
+        action = self.actor(state)
+        return action
 
-    def step(self) -> Tuple[Tensor]:
-        pass
+    def step(self, obs: Tensor) -> Tuple[Tensor, ...]:
+        """rollout one step"""
+        action = self.act(obs)
+        next_obs, reward, terminated, truncated, info = self.env.step(action.item())
+        reward = torch.tensor([reward], device=self.device)
+        done = terminated or truncated
+        if done:
+            next_obs = None
+        else:
+            next_obs = torch.tensor(next_obs, device=self.device).unsqueeze(0)
+
+        self.replay_buffer.push(obs, action, reward, next_obs)
+        return next_obs, action, reward, done
 
     def update(self):
         pass
 
     def learn(self):
         pass
+
