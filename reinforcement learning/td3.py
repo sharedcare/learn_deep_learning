@@ -109,10 +109,11 @@ class TD3:
         self.target_critic = Critic()
         self.replay_buffer = ReplayBuffer()
         self.device = device
+        self.action_max = action_max
 
     def act(self, state: Tensor) -> Tensor:
-        action = self.actor(state)
-        return action
+        action_mean = self.actor(state)
+        return torch.clamp(action_mean + self.eps * torch.randn_like(action_mean), -self.action_min, self.action_max)
 
     def step(self, obs: Tensor) -> Tuple[Tensor, ...]:
         """rollout one step"""
@@ -129,6 +130,7 @@ class TD3:
         return next_obs, action, reward, done
 
     def update(self):
+
         pass
 
     def learn(self):
