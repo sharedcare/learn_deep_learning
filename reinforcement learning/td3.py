@@ -1,7 +1,6 @@
 from collections import namedtuple, deque
 from typing import Tuple, Optional
 from torch import Tensor
-from torch.distributions import MultivariateNormal, Categorical
 
 import os
 import sys
@@ -59,7 +58,7 @@ class Actor(nn.Module):
         self.max_action = max_action
         self.to(device)
 
-    def forward(self, state: Tensor):
+    def forward(self, state: Tensor) -> Tensor:
         action = self.actor(state)
         return action * self.max_action
 
@@ -103,20 +102,20 @@ class Critic(nn.Module):
 
 class TD3:
     def __init__(self,
-                 env,
-                 num_states,
-                 num_actions,
-                 hidden_dim,
-                 batch_size,
+                 env: gym.Env,
+                 num_states: int,
+                 num_actions: int,
+                 hidden_dim: int,
+                 batch_size: int,
                  lr: float,
                  mem_capacity: int,
-                 tau,
-                 eps,
-                 gamma,
-                 noise_clip,
-                 action_max,
-                 num_updates,
-                 policy_delay,
+                 tau: float,
+                 eps: float,
+                 gamma: float,
+                 noise_clip: float,
+                 action_max: int,
+                 num_updates: int,
+                 policy_delay: int,
                  device: torch.device = "cpu") -> None:
         self.env = env
         self.num_states = num_states
@@ -129,8 +128,8 @@ class TD3:
         self.critic = Critic(num_states, hidden_dim)
         self.target_critic = Critic(num_states, hidden_dim)
         self.replay_buffer = ReplayBuffer(mem_capacity)
-        self.actor_optimizer = optim.Adam()
-        self.critic_optimizer = optim.Adam()
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
 
         # TD3 parameters
         self.tau = tau
@@ -165,7 +164,7 @@ class TD3:
         obs = torch.tensor(obs, device=self.device)
         return obs.unsqueeze(0)
 
-    def update(self):
+    def update(self) -> None:
         if len(self.replay_buffer) < self.batch_size:
             return
         for i in self.num_updates:
