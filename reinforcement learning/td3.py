@@ -144,7 +144,7 @@ class TD3:
         action_mean = self.actor(state)
         return torch.clamp(action_mean + self.eps * torch.randn_like(action_mean), -self.action_max, self.action_max)
 
-    def step(self, obs: Tensor) -> Tuple[Tensor, ...]:
+    def step(self, obs: Tensor) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
         """rollout one step"""
         action = self.act(obs)
         next_obs, reward, terminated, truncated, info = self.env.step(action.item())
@@ -167,7 +167,7 @@ class TD3:
     def update(self) -> None:
         if len(self.replay_buffer) < self.batch_size:
             return
-        for i in self.num_updates:
+        for i in range(self.num_updates):
             # randomly sample from replay buffer
             sample = self.replay_buffer.sample(self.batch_size)
             batch = self.replay_buffer.Transition(*zip(*sample))
