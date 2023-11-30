@@ -113,7 +113,7 @@ class TD3:
                  eps: float,
                  gamma: float,
                  noise_clip: float,
-                 action_max: int,
+                 action_max: float,
                  num_updates: int,
                  policy_delay: int,
                  device: torch.device = "cpu") -> None:
@@ -139,6 +139,20 @@ class TD3:
         self.action_max = action_max
         self.num_updates = num_updates
         self.policy_delay = policy_delay
+
+    def save(self, path: str) -> None:
+        """save model to designated path"""
+        torch.save(self.actor.state_dict(), path + "_actor.pt")
+        torch.save(self.critic.state_dict(), path + "_critic.pt")
+        print("model saved at: {}".format(path))
+
+    def load(self, path: str) -> None:
+        """load network from path"""
+        self.actor.load_state_dict(torch.load(path + "_actor.pt"))
+        self.critic.load_state_dict(torch.load(path + "_critic.pt"))
+        self.target_actor.load_state_dict(self.actor.state_dict())
+        self.target_critic.load_state_dict(self.critic.state_dict())
+        print("model loaded from: {}".format(path))
 
     def act(self, state: Tensor) -> Tensor:
         action_mean = self.actor(state)
@@ -231,3 +245,55 @@ class TD3:
 
         plot_rewards(show_result=True, episode_durations=episode_durations)
 
+
+if __name__ == "__main__":
+    BATCH_SIZE = 128                # sample batch size
+    GAMMA = 0.99                    # reward discount
+    TAU = 0.005                     # target network update rate
+    LR = 1e-4                       # learning rate
+    NUM_EPISODES = 500              # number of episodes for sampling and training
+    EPISODE_LEN = 100               # total episode steps for each rollout episode
+    NUM_UPDATES = 8                 # number of epochs for td3 update
+    MEMORY_CAPACITY = 3000          # replay buffer memory capacity
+    CLIP_PARAM = 0.2                # clip factor for td3 target policy noise
+    HIDDEN_DIM = 128                # hidden dimension size for actor-critic network
+    EPSILON = 0.1                   # std of Gaussian exploration noise
+    POLICY_DELAY = 2                # frequency of delayed policy updates
+
+    LOAD_MODEL_PATH = "saved_models/rl/td3.pt"
+    SAVE_MODEL_PATH = "saved_models/rl/new_td3.pt"
+
+    gym_env = gym.make("HalfCheetah-v2").unwrapped
+    n_states = gym_env.observation_space.shape[0]
+    n_actions = gym_env.action_space.n
+    max_action = float(gym_env.action_space.high[0])
+
+    if isinstance(gym_env.action_space, gym.spaces.Discrete):
+        is_continuous_action = False
+    else:
+        is_continuous_action = True
+
+    run_device = get_device()
+
+    td3 = TD3(gym_env,
+              n_states,
+              n_actions,
+              HIDDEN_DIM,
+              BATCH_SIZE,
+              LR,
+              MEMORY_CAPACITY,
+              TAU,
+              EPSILON,
+              GAMMA,
+              CLIP_PARAM,
+              max_action,
+              NUM_UPDATES,
+              POLICY_DELAY,
+              device=run_device
+              )
+
+    if LOAD_MODEL_PATH and os.path.exists(LOAD_MODEL_PATH):
+        td3.load(LOAD_MODEL_PATH)
+    td3.learn(NUM_EPISODES)
+    if SAVE_MODEL_PATH:
+        td3.save(SAVE_MODEL_PATH)
