@@ -41,7 +41,7 @@ class Actor(nn.Module):
                  num_states: int,
                  num_actions: int,
                  hidden_dim: int,
-                 max_action,
+                 max_action: float,
                  device: torch.device = "cpu",
                  ) -> None:
         super(Actor, self).__init__()
@@ -70,13 +70,14 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self,
                  num_states: int,
+                 num_actions: int,
                  hidden_dim: int,
                  device: torch.device = "cpu",
                  ) -> None:
         super(Critic, self).__init__()
 
         self.critic1 = nn.Sequential(
-            nn.Linear(num_states, hidden_dim),
+            nn.Linear(num_states + num_actions, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
@@ -84,7 +85,7 @@ class Critic(nn.Module):
         )
 
         self.critic2 = nn.Sequential(
-            nn.Linear(num_states, hidden_dim),
+            nn.Linear(num_states + num_actions, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
@@ -94,10 +95,15 @@ class Critic(nn.Module):
         self.to(device)
     
     def forward(self, state: Tensor, action: Tensor) -> Tuple[Tensor, Tensor]:
-        sa = torch.cat([state, action])
+        sa = torch.cat([state, action], dim=-1)
         q1 = self.critic1(sa)
         q2 = self.critic2(sa)
         return q1, q2
+
+    def q1(self, state: Tensor, action: Tensor) -> Tensor:
+        sa = torch.cat([state, action], dim=-1)
+        q1 = self.critic1(sa)
+        return q1
 
 
 class TD3:
@@ -123,10 +129,10 @@ class TD3:
         self.batch_size = batch_size
         self.device = device
 
-        self.actor = Actor(num_states, num_actions, hidden_dim, action_max)
-        self.target_actor = Actor(num_states, num_actions, hidden_dim, action_max)
-        self.critic = Critic(num_states, hidden_dim)
-        self.target_critic = Critic(num_states, hidden_dim)
+        self.actor = Actor(num_states, num_actions, hidden_dim, action_max, device=device)
+        self.target_actor = Actor(num_states, num_actions, hidden_dim, action_max, device=device)
+        self.critic = Critic(num_states, num_actions, hidden_dim, device=device)
+        self.target_critic = Critic(num_states, num_actions, hidden_dim, device=device)
         self.replay_buffer = ReplayBuffer(mem_capacity)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
@@ -161,13 +167,13 @@ class TD3:
     def step(self, obs: Tensor) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
         """rollout one step"""
         action = self.act(obs)
-        next_obs, reward, terminated, truncated, info = self.env.step(action.item())
-        reward = torch.tensor([reward], device=self.device)
+        next_obs, reward, terminated, truncated, info = self.env.step(action.detach().cpu().numpy().flatten())
+        reward = torch.tensor([reward], device=self.device, dtype=torch.float32)
         done = terminated or truncated
         if done:
             next_obs = None
         else:
-            next_obs = torch.tensor(next_obs, device=self.device).unsqueeze(0)
+            next_obs = torch.tensor(next_obs, device=self.device, dtype=torch.float32).unsqueeze(0)
 
         self.replay_buffer.push(obs, action, reward, next_obs)
         return next_obs, action, reward, done
@@ -175,7 +181,7 @@ class TD3:
     def reset(self) -> Tensor:
         """env reset"""
         obs, info = self.env.reset()
-        obs = torch.tensor(obs, device=self.device)
+        obs = torch.tensor(obs, device=self.device, dtype=torch.float32)
         return obs.unsqueeze(0)
 
     def update(self) -> None:
@@ -196,7 +202,8 @@ class TD3:
             with torch.no_grad():
                 # compute target actions
                 next_action_batch = torch.clamp(self.target_actor(next_state_batch) +
-                                                torch.clamp(self.eps, -self.noise_clip, self.noise_clip),
+                                                torch.clamp(torch.randn_like(action_batch) * self.eps,
+                                                            -self.noise_clip, self.noise_clip),
                                                 -self.action_max, self.action_max)
 
                 # calculate targets
@@ -212,7 +219,7 @@ class TD3:
 
             if i % self.policy_delay == 0:
                 # update policy
-                action_loss = self.critic.critic1(state_batch, self.actor(state_batch)).mean()
+                action_loss = self.critic.q1(state_batch, self.actor(state_batch)).mean()
 
                 self.actor_optimizer.zero_grad()
                 action_loss.backward()
@@ -265,7 +272,7 @@ if __name__ == "__main__":
 
     gym_env = gym.make("HalfCheetah-v2").unwrapped
     n_states = gym_env.observation_space.shape[0]
-    n_actions = gym_env.action_space.n
+    n_actions = gym_env.action_space.shape[0]
     max_action = float(gym_env.action_space.high[0])
 
     if isinstance(gym_env.action_space, gym.spaces.Discrete):
