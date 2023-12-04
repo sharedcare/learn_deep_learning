@@ -276,6 +276,7 @@ class PPO:
         duration = 0
         for i in range(num_episodes):
             for _ in range(self.episode_length):
+                self.env.render("human")
                 next_state, action, reward, value, done = self.step(state)
                 episode_rewards += reward.item()
                 state = next_state
@@ -312,7 +313,7 @@ if __name__ == "__main__":
     LOAD_MODEL_PATH = "saved_models/rl/ppo.pt"
     SAVE_MODEL_PATH = "saved_models/rl/new_ppo.pt"
 
-    gym_env = gym.make("CartPole-v1").unwrapped
+    gym_env = gym.make("CartPole-v1")
     n_states = gym_env.observation_space.shape[0]
     n_actions = gym_env.action_space.n
 
