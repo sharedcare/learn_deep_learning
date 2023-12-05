@@ -18,6 +18,62 @@ sys.path.append('./')
 from utils import get_device, plot_rewards
 
 
+class ReplayMemory:
+    """Rollout memory for PPO
+
+    """
+    Transition = namedtuple('Transition',
+                            ('states', 'actions', 'logprobs', 'rewards', 'values', 'dones'))
+
+    def __init__(self, device: torch.device = "cpu") -> None:
+        self.states = []
+        self.actions = []
+        self.logprobs = []
+        self.rewards = []
+        self.values = []
+        self.dones = []
+        self.count = 0
+        self.device = device
+
+    def push(self, *transition: Tensor):
+        """ save transition to buffer """
+        sample = self.Transition(*transition)
+        self.states.append(sample.states)
+        self.actions.append(sample.actions)
+        self.logprobs.append(sample.logprobs)
+        self.rewards.append(sample.rewards)
+        self.values.append(sample.values)
+        self.dones.append(sample.dones)
+        self.count += 1
+
+    def sample(self, batch_size: int):
+        batch_start = torch.arange(0, len(self), batch_size)
+        indices = torch.randperm(len(self), requires_grad=False, device=self.device)
+        batches = [indices[i:i + batch_size] for i in batch_start]
+        states = torch.cat(self.states)
+        actions = torch.cat(self.actions)
+        logprobs = torch.cat(self.logprobs)
+        rewards = torch.cat(self.rewards)
+        values = torch.cat(self.values)
+        dones = torch.cat(self.dones)
+
+        for batch in batches:
+            yield (states[batch], actions[batch], logprobs[batch], rewards[batch],
+                   values[batch], dones[batch])
+
+    def clear(self) -> None:
+        self.states = []
+        self.actions = []
+        self.logprobs = []
+        self.rewards = []
+        self.values = []
+        self.dones = []
+        self.count = 0
+
+    def __len__(self) -> int:
+        return len(self.states)
+
+
 class ReplayBuffer:
     """Rollout buffer for PPO
     
@@ -124,6 +180,7 @@ class PPO:
                  num_states: int,
                  num_actions: int,
                  hidden_dim: int,
+                 batch_size: int,
                  learning_rate: float,
                  episode_length: int,
                  continuous_action: bool,
@@ -137,10 +194,12 @@ class PPO:
                  max_grad_norm: float,
                  device: torch.device = "cpu") -> None:
         self.env = env
+        self.batch_size = batch_size
         self.device = device
         self.continuous_action = continuous_action
         self.episode_length = episode_length
         self.replay_buffer = ReplayBuffer()
+        # self.replay_mem = ReplayMemory(device=device)
         self.actor_critic = ActorCritic(num_states, num_actions, hidden_dim,
                                         continuous_action=continuous_action, device=device)
         self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
@@ -196,6 +255,7 @@ class PPO:
         action = torch.tensor(action, device=self.device).unsqueeze(0)
 
         self.replay_buffer.push(obs, action, logprob, reward, value, next_obs)
+        # self.replay_mem.push(obs, action, logprob, reward, value, torch.tensor(done, dtype=torch.int64).unsqueeze(0))
         return next_obs, action, reward, value, done
 
     def reset(self) -> Tensor:
@@ -227,7 +287,10 @@ class PPO:
         return advantages, returns
 
     def update(self) -> None:
-        batch = self.replay_buffer.sample()
+        batch = self.replay_buffer.sample(self.batch_size)
+        # batches = self.replay_mem.sample(self.batch_size)
+
+        # for state_batch, action_batch, action_logprobs_batch, reward_batch, value_batch, done_batch in batches:
 
         state_batch = torch.cat(batch.state).detach()
         action_batch = torch.cat(batch.action).detach()
@@ -265,6 +328,7 @@ class PPO:
             self.optimizer.step()
 
         self.replay_buffer.clear()
+        # self.replay_mem.clear()
 
     def learn(self, num_episodes: int) -> None:
         """training process"""
@@ -276,7 +340,7 @@ class PPO:
         duration = 0
         for i in range(num_episodes):
             for _ in range(self.episode_length):
-                self.env.render("human")
+                # self.env.render("human")
                 next_state, action, reward, value, done = self.step(state)
                 episode_rewards += reward.item()
                 state = next_state
@@ -298,15 +362,15 @@ class PPO:
 
 
 if __name__ == "__main__":
-    BATCH_SIZE = 128                # sample batch size
+    BATCH_SIZE = 8                  # sample batch size
     GAMMA = 0.99                    # reward discount
     LAMBDA = 0.005                  # adv rate
-    LR = 1e-4                       # learning rate
+    LR = 3e-4                       # learning rate
     NUM_EPISODES = 500              # number of episodes for sampling and training
-    EPISODE_LEN = 100               # total episode steps for each rollout episode
-    NUM_LEARNING_EPOCHS = 8         # number of epochs for ppo update
+    EPISODE_LEN = 20                # total episode steps for each rollout episode
+    NUM_LEARNING_EPOCHS = 4         # number of epochs for ppo update
     CLIP_PARAM = 0.2                # clip factor for ppo clip
-    HIDDEN_DIM = 128                # hidden dimension size for actor-critic network
+    HIDDEN_DIM = 256                # hidden dimension size for actor-critic network
     VALUE_LOSS_COEF = 0.5           # value loss coefficient
     ENTROPY_LOSS_COEF = 0.01        # entropy loss coefficient
 
@@ -315,12 +379,13 @@ if __name__ == "__main__":
 
     gym_env = gym.make("CartPole-v1")
     n_states = gym_env.observation_space.shape[0]
-    n_actions = gym_env.action_space.n
 
     if isinstance(gym_env.action_space, gym.spaces.Discrete):
         is_continuous_action = False
+        n_actions = gym_env.action_space.n
     else:
         is_continuous_action = True
+        n_actions = gym_env.action_space.shape[0]
 
     run_device = get_device()
 
@@ -328,6 +393,7 @@ if __name__ == "__main__":
               n_states,
               n_actions,
               HIDDEN_DIM,
+              BATCH_SIZE,
               LR,
               EPISODE_LEN,
               is_continuous_action,
