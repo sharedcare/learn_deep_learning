@@ -18,6 +18,49 @@ sys.path.append('./')
 from utils import get_device, plot_rewards
 
 
+class PPOMemory:
+    def __init__(self, batch_size):
+        self.states = []
+        self.probs = []
+        self.vals = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
+
+        self.batch_size = batch_size
+
+    def generate_batches(self):
+        n_states = len(self.states)
+        batch_start = np.arange(0, n_states, self.batch_size)
+        indices = np.arange(n_states, dtype=np.int64)
+        np.random.shuffle(indices)
+        batches = [indices[i:i+self.batch_size] for i in batch_start]
+
+        return np.array(self.states),\
+                np.array(self.actions),\
+                np.array(self.probs),\
+                np.array(self.vals),\
+                np.array(self.rewards),\
+                np.array(self.dones),\
+                batches
+
+    def store_memory(self, state, action, probs, vals, reward, done):
+        self.states.append(state)
+        self.actions.append(action)
+        self.probs.append(probs)
+        self.vals.append(vals)
+        self.rewards.append(reward)
+        self.dones.append(done)
+
+    def clear_memory(self):
+        self.states = []
+        self.probs = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
+        self.vals = []
+
+
 class ReplayMemory:
     """Rollout memory for PPO
 
@@ -198,8 +241,9 @@ class PPO:
         self.device = device
         self.continuous_action = continuous_action
         self.episode_length = episode_length
-        self.replay_buffer = ReplayBuffer()
+        # self.replay_buffer = ReplayBuffer()
         # self.replay_mem = ReplayMemory(device=device)
+        self.ppo_mem = PPOMemory(batch_size)
         self.actor_critic = ActorCritic(num_states, num_actions, hidden_dim,
                                         continuous_action=continuous_action, device=device)
         self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
@@ -254,8 +298,9 @@ class PPO:
 
         action = torch.tensor(action, device=self.device).unsqueeze(0)
 
-        self.replay_buffer.push(obs, action, logprob, reward, value, next_obs)
+        # self.replay_buffer.push(obs, action, logprob, reward, value, next_obs)
         # self.replay_mem.push(obs, action, logprob, reward, value, torch.tensor(done, dtype=torch.int64).unsqueeze(0))
+        self.ppo_mem.store_memory(obs, action, logprob, value, reward, done)
         return next_obs, action, reward, value, done
 
     def reset(self) -> Tensor:
@@ -287,23 +332,27 @@ class PPO:
         return advantages, returns
 
     def update(self) -> None:
-        batch = self.replay_buffer.sample(self.batch_size)
-        # batches = self.replay_mem.sample(self.batch_size)
-
-        # for state_batch, action_batch, action_logprobs_batch, reward_batch, value_batch, done_batch in batches:
-
-        state_batch = torch.cat(batch.state).detach()
-        action_batch = torch.cat(batch.action).detach()
-        action_logprobs_batch = torch.cat(batch.logprobs).detach()
-        reward_batch = torch.cat(batch.reward).detach()
-        value_batch = torch.cat(batch.value).detach()
-        done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state], device=self.device)
-
-        advantages, returns = self.compute_returns(state_batch[-1], value_batch, reward_batch, done_batch)
-        advantages = advantages.detach()
-        returns = returns.detach()
-
         for _ in range(self.num_learning_epochs):
+            # batch = self.replay_buffer.sample(self.batch_size)
+            # batches = self.replay_mem.sample(self.batch_size)
+            (state_arr, action_arr, old_prob_arr, vals_arr,
+             reward_arr, dones_arr, batches) = self.ppo_mem.generate_batches()
+
+            state_batch = state_arr
+
+            # for state_batch, action_batch, action_logprobs_batch, reward_batch, value_batch, done_batch in batches:
+
+                # state_batch = torch.cat(batch.state).detach()
+                # action_batch = torch.cat(batch.action).detach()
+                # action_logprobs_batch = torch.cat(batch.logprobs).detach()
+                # reward_batch = torch.cat(batch.reward).detach()
+                # value_batch = torch.cat(batch.value).detach()
+                # done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state], device=self.device)
+
+            advantages, returns = self.compute_returns(state_batch[-1], value_batch, reward_batch, done_batch)
+            advantages = advantages.detach()
+            returns = returns.detach()
+
             action_logprobs, values, entropy = self.evaluate(state_batch, action_batch)
 
             # ratio = (pi_theta / pi_theta_old)
@@ -327,31 +376,30 @@ class PPO:
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
-        self.replay_buffer.clear()
+        # self.replay_buffer.clear()
         # self.replay_mem.clear()
+        self.ppo_mem.clear_memory()
 
     def learn(self, num_episodes: int) -> None:
         """training process"""
         # rollout
         episode_durations = []
-        done = False
-        episode_rewards = 0
-        state = self.reset()
-        duration = 0
+        episode_step = 0
         for i in range(num_episodes):
-            for _ in range(self.episode_length):
+            done = False
+            episode_rewards = 0
+            state = self.reset()
+            duration = 0
+            while not done:
                 # self.env.render("human")
                 next_state, action, reward, value, done = self.step(state)
                 episode_rewards += reward.item()
                 state = next_state
                 duration += 1
-                if done:
-                    state = self.reset()
-                    duration = 0
-                    episode_rewards = 0
-                    done = False
-
-            self.update()
+                episode_step += 1
+                if episode_step % self.episode_length == 0:
+                    self.update()
+                    episode_step = 0
 
             episode_durations.append(duration + 1)
             print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
@@ -364,7 +412,7 @@ class PPO:
 if __name__ == "__main__":
     BATCH_SIZE = 8                  # sample batch size
     GAMMA = 0.99                    # reward discount
-    LAMBDA = 0.005                  # adv rate
+    LAMBDA = 0.95                  # adv rate
     LR = 3e-4                       # learning rate
     NUM_EPISODES = 500              # number of episodes for sampling and training
     EPISODE_LEN = 20                # total episode steps for each rollout episode
