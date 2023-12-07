@@ -18,49 +18,6 @@ sys.path.append('./')
 from utils import get_device, plot_rewards
 
 
-class PPOMemory:
-    def __init__(self, batch_size):
-        self.states = []
-        self.probs = []
-        self.vals = []
-        self.actions = []
-        self.rewards = []
-        self.dones = []
-
-        self.batch_size = batch_size
-
-    def generate_batches(self):
-        n_states = len(self.states)
-        batch_start = np.arange(0, n_states, self.batch_size)
-        indices = np.arange(n_states, dtype=np.int64)
-        np.random.shuffle(indices)
-        batches = [indices[i:i+self.batch_size] for i in batch_start]
-
-        return np.array(self.states),\
-                np.array(self.actions),\
-                np.array(self.probs),\
-                np.array(self.vals),\
-                np.array(self.rewards),\
-                np.array(self.dones),\
-                batches
-
-    def store_memory(self, state, action, probs, vals, reward, done):
-        self.states.append(state)
-        self.actions.append(action)
-        self.probs.append(probs)
-        self.vals.append(vals)
-        self.rewards.append(reward)
-        self.dones.append(done)
-
-    def clear_memory(self):
-        self.states = []
-        self.probs = []
-        self.actions = []
-        self.rewards = []
-        self.dones = []
-        self.vals = []
-
-
 class ReplayMemory:
     """Rollout memory for PPO
 
@@ -75,6 +32,8 @@ class ReplayMemory:
         self.rewards = []
         self.values = []
         self.dones = []
+        self.advantages = torch.zeros(1, device=device)
+        self.returns = torch.zeros(1, device=device)
         self.count = 0
         self.device = device
 
@@ -90,6 +49,7 @@ class ReplayMemory:
         self.count += 1
 
     def sample(self, batch_size: int):
+        """ sample transitions from memory buffer """
         batch_start = torch.arange(0, len(self), batch_size)
         indices = torch.randperm(len(self), requires_grad=False, device=self.device)
         batches = [indices[i:i + batch_size] for i in batch_start]
@@ -102,7 +62,7 @@ class ReplayMemory:
 
         for batch in batches:
             yield (states[batch], actions[batch], logprobs[batch], rewards[batch],
-                   values[batch], dones[batch])
+                   values[batch], dones[batch], self.advantages[batch].detach(), self.returns[batch].detach())
 
     def clear(self) -> None:
         self.states = []
@@ -113,38 +73,29 @@ class ReplayMemory:
         self.dones = []
         self.count = 0
 
+    def compute_returns(self, last_values: Tensor, gamma: float, lam: float) -> None:
+        """ GAE """
+        rewards = torch.cat(self.rewards)
+        values = torch.cat(self.values)
+        dones = torch.cat(self.dones)
+        advantage = 0
+        self.advantages = torch.zeros_like(rewards)
+        self.returns = torch.zeros_like(rewards)
+        for step in reversed(range(len(rewards))):
+            if step == len(rewards) - 1:
+                next_values = last_values
+            else:
+                next_values = values[step + 1]
+            next_non_terminal = 1.0 - dones[step]
+            delta = rewards[step] + next_non_terminal * gamma * next_values - values[step]  # td error
+            advantage = delta + next_non_terminal * gamma * lam * advantage  # advantage
+            self.returns[step] = advantage + values[step]  # td target
+            self.advantages[step] = advantage
+            # normalize the advantages
+            self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std(dim=-1) + 1e-7)
+
     def __len__(self) -> int:
         return len(self.states)
-
-
-class ReplayBuffer:
-    """Rollout buffer for PPO
-    
-    """
-    Transition = namedtuple('Transition',
-                            ('state', 'action', 'logprobs', 'reward', 'value', 'next_state'))
-
-    def __init__(self, device: str = "cpu") -> None:
-        self.mem = []
-        self.count = 0
-
-    def push(self, *transition: Tensor):
-        """ save transition to buffer """
-        self.mem.append(self.Transition(*transition))
-        self.count += 1
-
-    def sample(self, batch_size: int = None) -> Transition:
-        """ sample transitions from memory buffer """
-        if batch_size is None:
-            return self.Transition(*zip(*self.mem))
-        else:
-            return self.Transition(*zip(*random.sample(self.mem, batch_size)))
-
-    def clear(self) -> None:
-        self.mem = []
-
-    def __len__(self) -> int:
-        return len(self.mem)
 
 
 class ActorCritic(nn.Module):
@@ -241,9 +192,7 @@ class PPO:
         self.device = device
         self.continuous_action = continuous_action
         self.episode_length = episode_length
-        # self.replay_buffer = ReplayBuffer()
-        # self.replay_mem = ReplayMemory(device=device)
-        self.ppo_mem = PPOMemory(batch_size)
+        self.replay_mem = ReplayMemory(device=device)
         self.actor_critic = ActorCritic(num_states, num_actions, hidden_dim,
                                         continuous_action=continuous_action, device=device)
         self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
@@ -271,7 +220,6 @@ class PPO:
     def act(self, state: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         action, action_logprobs = self.actor_critic.act(state)
         value = self.actor_critic.evaluate(state)
-        # self.replay_buffer.push(state, action, action_logprobs)
         if self.continuous_action:
             return action.detach(), action_logprobs, value
         else:
@@ -298,9 +246,7 @@ class PPO:
 
         action = torch.tensor(action, device=self.device).unsqueeze(0)
 
-        # self.replay_buffer.push(obs, action, logprob, reward, value, next_obs)
-        # self.replay_mem.push(obs, action, logprob, reward, value, torch.tensor(done, dtype=torch.int64).unsqueeze(0))
-        self.ppo_mem.store_memory(obs, action, logprob, value, reward, done)
+        self.replay_mem.push(obs, action, logprob, reward, value, torch.tensor(done, dtype=torch.int64).unsqueeze(0))
         return next_obs, action, reward, value, done
 
     def reset(self) -> Tensor:
@@ -309,76 +255,37 @@ class PPO:
         obs = torch.tensor(obs, device=self.device)
         return obs.unsqueeze(0)
 
-    def compute_returns(self, last_state: Tensor, values: Tensor,
-                        rewards: Tensor, dones: Tensor) -> Tuple[Tensor, Tensor]:
-        """ GAE """
-        last_values = self.actor_critic.evaluate(last_state)
-        advantage = 0
-        advantages = torch.zeros_like(rewards)
-        returns = torch.zeros_like(rewards)
-        for step in reversed(range(len(rewards))):
-            if step == len(rewards) - 1:
-                next_values = last_values
-            else:
-                next_values = values[step + 1]
-            next_non_terminal = 1.0 - dones[step]
-            delta = rewards[step] + next_non_terminal * self.gamma * next_values - values[step]  # td error
-            advantage = delta + next_non_terminal * self.gamma * self.lam * advantage  # advantage
-            returns[step] = advantage + values[step]  # td target
-            advantages[step] = advantage
-            # normalize the advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std(dim=-1) + 1e-7)
-
-        return advantages, returns
-
     def update(self) -> None:
         for _ in range(self.num_learning_epochs):
-            # batch = self.replay_buffer.sample(self.batch_size)
-            # batches = self.replay_mem.sample(self.batch_size)
-            (state_arr, action_arr, old_prob_arr, vals_arr,
-             reward_arr, dones_arr, batches) = self.ppo_mem.generate_batches()
+            batches = self.replay_mem.sample(self.batch_size)
 
-            state_batch = state_arr
+            for state_batch, action_batch, action_logprobs_batch, reward_batch, value_batch, \
+                    done_batch, advantage_batch, return_batch in batches:
 
-            # for state_batch, action_batch, action_logprobs_batch, reward_batch, value_batch, done_batch in batches:
+                action_logprobs, values, entropy = self.evaluate(state_batch, action_batch)
 
-                # state_batch = torch.cat(batch.state).detach()
-                # action_batch = torch.cat(batch.action).detach()
-                # action_logprobs_batch = torch.cat(batch.logprobs).detach()
-                # reward_batch = torch.cat(batch.reward).detach()
-                # value_batch = torch.cat(batch.value).detach()
-                # done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state], device=self.device)
+                # ratio = (pi_theta / pi_theta_old)
+                ratios = torch.exp(action_logprobs - action_logprobs_batch.detach())
 
-            advantages, returns = self.compute_returns(state_batch[-1], value_batch, reward_batch, done_batch)
-            advantages = advantages.detach()
-            returns = returns.detach()
+                # surrogate loss
+                surrogate = -ratios * advantage_batch
+                surrogate_clipped = -torch.clamp(ratios, 1 - self.clip_param, 1 + self.clip_param)
+                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
-            action_logprobs, values, entropy = self.evaluate(state_batch, action_batch)
+                # value loss
+                value_loss = self.value_loss_coef * F.mse_loss(values.squeeze(-1), return_batch).mean()
 
-            # ratio = (pi_theta / pi_theta_old)
-            ratios = torch.exp(action_logprobs - action_logprobs_batch.detach())
+                # entropy loss
+                entropy_loss = self.entropy_coef * entropy.mean()
 
-            # surrogate loss
-            surrogate = -ratios * advantages
-            surrogate_clipped = -torch.clamp(ratios, 1 - self.clip_param, 1 + self.clip_param)
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+                loss = surrogate_loss + value_loss - entropy_loss
 
-            # value loss
-            value_loss = self.value_loss_coef * F.mse_loss(values.squeeze(-1), returns).mean()
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+                self.optimizer.step()
 
-            # entropy loss
-            entropy_loss = self.entropy_coef * entropy.mean()
-
-            loss = surrogate_loss + value_loss - entropy_loss
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
-            self.optimizer.step()
-
-        # self.replay_buffer.clear()
-        # self.replay_mem.clear()
-        self.ppo_mem.clear_memory()
+        self.replay_mem.clear()
 
     def learn(self, num_episodes: int) -> None:
         """training process"""
@@ -398,6 +305,7 @@ class PPO:
                 duration += 1
                 episode_step += 1
                 if episode_step % self.episode_length == 0:
+                    self.replay_mem.compute_returns(value, self.gamma, self.lam)
                     self.update()
                     episode_step = 0
 
@@ -410,15 +318,15 @@ class PPO:
 
 
 if __name__ == "__main__":
-    BATCH_SIZE = 8                  # sample batch size
+    BATCH_SIZE = 4                  # sample batch size
     GAMMA = 0.99                    # reward discount
-    LAMBDA = 0.95                  # adv rate
-    LR = 3e-4                       # learning rate
+    LAMBDA = 0.95                   # adv rate
+    LR = 1e-4                       # learning rate
     NUM_EPISODES = 500              # number of episodes for sampling and training
     EPISODE_LEN = 20                # total episode steps for each rollout episode
     NUM_LEARNING_EPOCHS = 4         # number of epochs for ppo update
     CLIP_PARAM = 0.2                # clip factor for ppo clip
-    HIDDEN_DIM = 256                # hidden dimension size for actor-critic network
+    HIDDEN_DIM = 128                # hidden dimension size for actor-critic network
     VALUE_LOSS_COEF = 0.5           # value loss coefficient
     ENTROPY_LOSS_COEF = 0.01        # entropy loss coefficient
 
