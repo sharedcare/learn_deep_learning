@@ -121,6 +121,7 @@ class TD3:
                  noise_clip: float,
                  action_max: float,
                  num_updates: int,
+                 start_steps: int,
                  policy_delay: int,
                  device: torch.device = "cpu") -> None:
         self.env = env
@@ -144,6 +145,7 @@ class TD3:
         self.noise_clip = noise_clip
         self.action_max = action_max
         self.num_updates = num_updates
+        self.start_steps = start_steps
         self.policy_delay = policy_delay
 
     def save(self, path: str) -> None:
@@ -164,10 +166,15 @@ class TD3:
         action_mean = self.actor(state)
         return torch.clamp(action_mean + self.eps * torch.randn_like(action_mean), -self.action_max, self.action_max)
 
-    def step(self, obs: Tensor) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
+    def step(self, obs: Tensor, timestep: int) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
         """rollout one step"""
-        action = self.act(obs)
-        next_obs, reward, terminated, truncated, info = self.env.step(action.detach().cpu().numpy().flatten())
+        if timestep < self.start_steps:
+            action = self.env.action_space.sample()
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
+            action = torch.tensor(action, device=self.device).unsqueeze(0)
+        else:
+            action = self.act(obs)
+            next_obs, reward, terminated, truncated, info = self.env.step(action.detach().cpu().numpy().flatten())
         reward = torch.tensor([reward], device=self.device, dtype=torch.float32)
         done = terminated or truncated
         if done:
@@ -197,7 +204,8 @@ class TD3:
             state_batch = torch.cat(batch.state)
             action_batch = torch.cat(batch.action)
             reward_batch = torch.cat(batch.reward)
-            done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state], device=self.device)
+            done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state],
+                                      device=self.device)
 
             with torch.no_grad():
                 # compute target actions
@@ -208,11 +216,11 @@ class TD3:
 
                 # calculate targets
                 target_q1, target_q2 = self.target_critic(next_state_batch, next_action_batch)
-                target_q = reward_batch + self.gamma * (1 - done_batch) * torch.min(target_q1, target_q2)
+                target_q = reward_batch + self.gamma * (1 - done_batch) * torch.min(target_q1.squeeze(-1), target_q2.squeeze(-1))
 
             # update Q-functions
             q1, q2 = self.critic(state_batch, action_batch)
-            critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
+            critic_loss = F.mse_loss(q1.squeeze(-1), target_q) + F.mse_loss(q2.squeeze(-1), target_q)
             self.critic_optimizer.zero_grad()
             critic_loss.backward()
             self.critic_optimizer.step()
@@ -240,7 +248,7 @@ class TD3:
             state = self.reset()
             duration = 0
             while not done:
-                next_state, action, reward, done = self.step(state)
+                next_state, action, reward, done = self.step(state, i)
                 episode_rewards += reward.item()
                 state = next_state
                 self.update()
@@ -259,6 +267,7 @@ if __name__ == "__main__":
     TAU = 0.005                     # target network update rate
     LR = 1e-4                       # learning rate
     NUM_EPISODES = 500              # number of episodes for sampling and training
+    START_EPISODES = 50
     EPISODE_LEN = 100               # total episode steps for each rollout episode
     NUM_UPDATES = 8                 # number of epochs for td3 update
     MEMORY_CAPACITY = 3000          # replay buffer memory capacity
@@ -270,7 +279,7 @@ if __name__ == "__main__":
     LOAD_MODEL_PATH = "saved_models/rl/td3.pt"
     SAVE_MODEL_PATH = "saved_models/rl/new_td3.pt"
 
-    gym_env = gym.make("HalfCheetah-v2").unwrapped
+    gym_env = gym.make("LunarLanderContinuous-v2").unwrapped
     n_states = gym_env.observation_space.shape[0]
     n_actions = gym_env.action_space.shape[0]
     max_action = float(gym_env.action_space.high[0])
@@ -295,6 +304,7 @@ if __name__ == "__main__":
               CLIP_PARAM,
               max_action,
               NUM_UPDATES,
+              START_EPISODES,
               POLICY_DELAY,
               device=run_device
               )
