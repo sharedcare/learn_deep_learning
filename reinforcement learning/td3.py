@@ -202,7 +202,7 @@ class TD3:
             next_state_batch = torch.cat([torch.zeros(1, self.num_states, device=self.device)
                                           if ns is None else ns for ns in batch.next_state])
             state_batch = torch.cat(batch.state)
-            action_batch = torch.cat(batch.action)
+            action_batch = torch.cat(batch.action).detach()
             reward_batch = torch.cat(batch.reward)
             done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state],
                                       device=self.device)
@@ -266,13 +266,12 @@ if __name__ == "__main__":
     GAMMA = 0.99                    # reward discount
     TAU = 0.005                     # target network update rate
     LR = 1e-4                       # learning rate
-    NUM_EPISODES = 500              # number of episodes for sampling and training
-    START_EPISODES = 50
-    EPISODE_LEN = 100               # total episode steps for each rollout episode
+    NUM_EPISODES = 1000             # number of episodes for sampling and training
+    START_EPISODES = 100            # total episode steps for warmup random exploration
     NUM_UPDATES = 8                 # number of epochs for td3 update
-    MEMORY_CAPACITY = 3000          # replay buffer memory capacity
+    MEMORY_CAPACITY = 1000000       # replay buffer memory capacity
     CLIP_PARAM = 0.2                # clip factor for td3 target policy noise
-    HIDDEN_DIM = 128                # hidden dimension size for actor-critic network
+    HIDDEN_DIM = 256                # hidden dimension size for actor-critic network
     EPSILON = 0.1                   # std of Gaussian exploration noise
     POLICY_DELAY = 2                # frequency of delayed policy updates
 
