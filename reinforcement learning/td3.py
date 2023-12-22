@@ -48,11 +48,11 @@ class Actor(nn.Module):
         # TD3 is for contiunous action space only
         self.actor = nn.Sequential(
             nn.Linear(num_states, hidden_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, num_actions),
-            nn.Tanh()
+            nn.ReLU()
         )
 
         self.max_action = max_action
@@ -60,7 +60,7 @@ class Actor(nn.Module):
 
     def forward(self, state: Tensor) -> Tensor:
         action = self.actor(state)
-        return action * self.max_action
+        return action
 
     @property
     def entropy(self) -> Tensor:
@@ -78,17 +78,17 @@ class Critic(nn.Module):
 
         self.critic1 = nn.Sequential(
             nn.Linear(num_states + num_actions, hidden_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
 
         self.critic2 = nn.Sequential(
             nn.Linear(num_states + num_actions, hidden_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
 
@@ -120,6 +120,7 @@ class TD3:
                  gamma: float,
                  noise_clip: float,
                  action_max: float,
+                 action_min: float,
                  num_updates: int,
                  start_steps: int,
                  policy_delay: int,
@@ -144,6 +145,7 @@ class TD3:
         self.gamma = gamma
         self.noise_clip = noise_clip
         self.action_max = action_max
+        self.action_min = action_min
         self.num_updates = num_updates
         self.start_steps = start_steps
         self.policy_delay = policy_delay
@@ -164,7 +166,7 @@ class TD3:
 
     def act(self, state: Tensor) -> Tensor:
         action_mean = self.actor(state)
-        return torch.clamp(action_mean + self.eps * torch.randn_like(action_mean), -self.action_max, self.action_max)
+        return torch.clamp(action_mean + self.eps * torch.randn_like(action_mean), self.action_min, self.action_max)
 
     def step(self, obs: Tensor, timestep: int) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
         """rollout one step"""
@@ -212,11 +214,12 @@ class TD3:
                 next_action_batch = torch.clamp(self.target_actor(next_state_batch) +
                                                 torch.clamp(torch.randn_like(action_batch) * self.eps,
                                                             -self.noise_clip, self.noise_clip),
-                                                -self.action_max, self.action_max)
+                                                self.action_min, self.action_max)
 
                 # calculate targets
                 target_q1, target_q2 = self.target_critic(next_state_batch, next_action_batch)
-                target_q = reward_batch + self.gamma * (1 - done_batch) * torch.min(target_q1.squeeze(-1), target_q2.squeeze(-1))
+                target_q = reward_batch + self.gamma * (1 - done_batch) * torch.min(target_q1.squeeze(-1),
+                                                                                    target_q2.squeeze(-1))
 
             # update Q-functions
             q1, q2 = self.critic(state_batch, action_batch)
@@ -227,7 +230,7 @@ class TD3:
 
             if i % self.policy_delay == 0:
                 # update policy
-                action_loss = self.critic.q1(state_batch, self.actor(state_batch)).mean()
+                action_loss = -self.critic.q1(state_batch, self.actor(state_batch)).mean()
 
                 self.actor_optimizer.zero_grad()
                 action_loss.backward()
@@ -265,14 +268,14 @@ if __name__ == "__main__":
     BATCH_SIZE = 128                # sample batch size
     GAMMA = 0.99                    # reward discount
     TAU = 0.005                     # target network update rate
-    LR = 1e-4                       # learning rate
+    LR = 5e-4                       # learning rate
     NUM_EPISODES = 1000             # number of episodes for sampling and training
     START_EPISODES = 100            # total episode steps for warmup random exploration
     NUM_UPDATES = 8                 # number of epochs for td3 update
     MEMORY_CAPACITY = 1000000       # replay buffer memory capacity
-    CLIP_PARAM = 0.2                # clip factor for td3 target policy noise
+    CLIP_PARAM = 0.5                # clip factor for td3 target policy noise
     HIDDEN_DIM = 256                # hidden dimension size for actor-critic network
-    EPSILON = 0.1                   # std of Gaussian exploration noise
+    EPSILON = 0.2                   # std of Gaussian exploration noise
     POLICY_DELAY = 2                # frequency of delayed policy updates
 
     LOAD_MODEL_PATH = "saved_models/rl/td3.pt"
@@ -282,6 +285,7 @@ if __name__ == "__main__":
     n_states = gym_env.observation_space.shape[0]
     n_actions = gym_env.action_space.shape[0]
     max_action = float(gym_env.action_space.high[0])
+    min_action = float(gym_env.action_space.low[0])
 
     if isinstance(gym_env.action_space, gym.spaces.Discrete):
         is_continuous_action = False
@@ -302,6 +306,7 @@ if __name__ == "__main__":
               GAMMA,
               CLIP_PARAM,
               max_action,
+              min_action,
               NUM_UPDATES,
               START_EPISODES,
               POLICY_DELAY,
