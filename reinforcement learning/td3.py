@@ -52,7 +52,7 @@ class Actor(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, num_actions),
-            nn.ReLU()
+            nn.Tanh()
         )
 
         self.max_action = max_action
@@ -121,7 +121,6 @@ class TD3:
                  noise_clip: float,
                  action_max: float,
                  action_min: float,
-                 num_updates: int,
                  start_steps: int,
                  policy_delay: int,
                  device: torch.device = "cpu") -> None:
@@ -129,6 +128,7 @@ class TD3:
         self.num_states = num_states
         self.num_actions = num_actions
         self.batch_size = batch_size
+        self.timestep = 0
         self.device = device
 
         self.actor = Actor(num_states, num_actions, hidden_dim, action_max, device=device)
@@ -146,7 +146,7 @@ class TD3:
         self.noise_clip = noise_clip
         self.action_max = action_max
         self.action_min = action_min
-        self.num_updates = num_updates
+        self.num_update = 0
         self.start_steps = start_steps
         self.policy_delay = policy_delay
 
@@ -168,9 +168,9 @@ class TD3:
         action_mean = self.actor(state)
         return torch.clamp(action_mean + self.eps * torch.randn_like(action_mean), self.action_min, self.action_max)
 
-    def step(self, obs: Tensor, timestep: int) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
+    def step(self, obs: Tensor) -> Tuple[Optional[Tensor], Tensor, Tensor, bool]:
         """rollout one step"""
-        if timestep < self.start_steps:
+        if self.timestep < self.start_steps:
             action = self.env.action_space.sample()
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             action = torch.tensor(action, device=self.device).unsqueeze(0)
@@ -194,53 +194,53 @@ class TD3:
         return obs.unsqueeze(0)
 
     def update(self) -> None:
-        if len(self.replay_buffer) < self.batch_size:
+        if self.timestep < self.start_steps:
             return
-        for i in range(self.num_updates):
-            # randomly sample from replay buffer
-            sample = self.replay_buffer.sample(self.batch_size)
-            batch = self.replay_buffer.Transition(*zip(*sample))
+        self.num_update += 1
+        # randomly sample from replay buffer
+        sample = self.replay_buffer.sample(self.batch_size)
+        batch = self.replay_buffer.Transition(*zip(*sample))
 
-            next_state_batch = torch.cat([torch.zeros(1, self.num_states, device=self.device)
-                                          if ns is None else ns for ns in batch.next_state])
-            state_batch = torch.cat(batch.state)
-            action_batch = torch.cat(batch.action).detach()
-            reward_batch = torch.cat(batch.reward)
-            done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state],
-                                      device=self.device)
+        next_state_batch = torch.cat([torch.zeros(1, self.num_states, device=self.device)
+                                      if ns is None else ns for ns in batch.next_state])
+        state_batch = torch.cat(batch.state)
+        action_batch = torch.cat(batch.action).detach()
+        reward_batch = torch.cat(batch.reward)
+        done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state],
+                                  device=self.device)
 
-            with torch.no_grad():
-                # compute target actions
-                next_action_batch = torch.clamp(self.target_actor(next_state_batch) +
-                                                torch.clamp(torch.randn_like(action_batch) * self.eps,
-                                                            -self.noise_clip, self.noise_clip),
-                                                self.action_min, self.action_max)
+        with torch.no_grad():
+            # compute target actions
+            next_action_batch = torch.clamp(self.target_actor(next_state_batch) +
+                                            torch.clamp(torch.randn_like(action_batch) * self.eps,
+                                                        -self.noise_clip, self.noise_clip),
+                                            self.action_min, self.action_max)
 
-                # calculate targets
-                target_q1, target_q2 = self.target_critic(next_state_batch, next_action_batch)
-                target_q = reward_batch + self.gamma * (1 - done_batch) * torch.min(target_q1.squeeze(-1),
-                                                                                    target_q2.squeeze(-1))
+            # calculate targets
+            target_q1, target_q2 = self.target_critic(next_state_batch, next_action_batch)
+            target_q = reward_batch + self.gamma * (1 - done_batch) * torch.min(target_q1.squeeze(-1),
+                                                                                target_q2.squeeze(-1))
 
-            # update Q-functions
-            q1, q2 = self.critic(state_batch, action_batch)
-            critic_loss = F.mse_loss(q1.squeeze(-1), target_q) + F.mse_loss(q2.squeeze(-1), target_q)
-            self.critic_optimizer.zero_grad()
-            critic_loss.backward()
-            self.critic_optimizer.step()
+        # update Q-functions
+        q1, q2 = self.critic(state_batch, action_batch)
+        critic_loss = F.mse_loss(q1.squeeze(-1), target_q) + F.mse_loss(q2.squeeze(-1), target_q)
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
 
-            if i % self.policy_delay == 0:
-                # update policy
-                action_loss = -self.critic.q1(state_batch, self.actor(state_batch)).mean()
+        if self.num_update % self.policy_delay == 0:
+            # update policy
+            action_loss = -self.critic.q1(state_batch, self.actor(state_batch)).mean()
 
-                self.actor_optimizer.zero_grad()
-                action_loss.backward()
-                self.actor_optimizer.step()
+            self.actor_optimizer.zero_grad()
+            action_loss.backward()
+            self.actor_optimizer.step()
 
-                # update target networks
-                for param, target_param in zip(self.critic.parameters(), self.target_critic.parameters()):
-                    target_param.data.copy_(self.tau * target_param + (1 - self.tau) * param)
-                for param, target_param in zip(self.actor.parameters(), self.target_actor.parameters()):
-                    target_param.data.copy_(self.tau * target_param + (1 - self.tau) * param)
+            # update target networks
+            for param, target_param in zip(self.critic.parameters(), self.target_critic.parameters()):
+                target_param.data.copy_(self.tau * target_param.data + (1 - self.tau) * param.data)
+            for param, target_param in zip(self.actor.parameters(), self.target_actor.parameters()):
+                target_param.data.copy_(self.tau * target_param.data + (1 - self.tau) * param.data)
 
     def learn(self, num_episodes: int) -> None:
         """training process"""
@@ -251,12 +251,13 @@ class TD3:
             state = self.reset()
             duration = 0
             while not done:
-                next_state, action, reward, done = self.step(state, i)
+                next_state, action, reward, done = self.step(state)
                 episode_rewards += reward.item()
                 state = next_state
                 self.update()
                 duration += 1
 
+            self.timestep += 1
             episode_durations.append(duration + 1)
             print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
             plot_rewards(show_result=False, episode_durations=episode_durations)
@@ -265,13 +266,12 @@ class TD3:
 
 
 if __name__ == "__main__":
-    BATCH_SIZE = 128                # sample batch size
+    BATCH_SIZE = 256                # sample batch size
     GAMMA = 0.99                    # reward discount
-    TAU = 0.005                     # target network update rate
+    TAU = 0.995                     # target network update rate
     LR = 5e-4                       # learning rate
     NUM_EPISODES = 1000             # number of episodes for sampling and training
-    START_EPISODES = 100            # total episode steps for warmup random exploration
-    NUM_UPDATES = 8                 # number of epochs for td3 update
+    START_EPISODES = 50             # total episode steps for warmup random exploration
     MEMORY_CAPACITY = 1000000       # replay buffer memory capacity
     CLIP_PARAM = 0.5                # clip factor for td3 target policy noise
     HIDDEN_DIM = 256                # hidden dimension size for actor-critic network
@@ -307,7 +307,6 @@ if __name__ == "__main__":
               CLIP_PARAM,
               max_action,
               min_action,
-              NUM_UPDATES,
               START_EPISODES,
               POLICY_DELAY,
               device=run_device
