@@ -17,23 +17,41 @@ sys.path.append('./')
 from utils import get_device, plot_rewards
 
 
-class ReplayBuffer(object):
-    Transition = namedtuple('Transition',
-                            ('state', 'action', 'reward', 'next_state'))
+class ReplayBuffer:
+    def __init__(self, max_size, input_shape, num_actions, device: torch.device = "cpu"):
+        self.mem_size = max_size
+        self.mem_cntr = 0
+        self.state_memory = torch.zeros((self.mem_size, input_shape), device=device)
+        self.next_state_memory = torch.zeros((self.mem_size, input_shape), device=device)
+        self.action_memory = torch.zeros((self.mem_size, num_actions), device=device)
+        self.reward_memory = torch.zeros(self.mem_size, device=device)
+        self.terminal_memory = torch.zeros(self.mem_size, dtype=torch.bool, device=device)
+        self.device = device
 
-    def __init__(self, capacity: int) -> None:
-        self.mem = deque([], maxlen=capacity)
-
-    def push(self, *transition: Tensor) -> None:
+    def store(self, state, action, reward, state_, done):
         """ save transition to buffer """
-        self.mem.append(self.Transition(*transition))
+        index = self.mem_cntr % self.mem_size
+        self.state_memory[index] = state
+        self.next_state_memory[index] = state_
+        self.terminal_memory[index] = done
+        self.reward_memory[index] = reward
+        self.action_memory[index] = action
 
-    def sample(self, batch_size: int) -> list:
+        self.mem_cntr += 1
+
+    def sample(self, batch_size):
         """ randomly sample memory buffer """
-        return random.sample(self.mem, batch_size)
+        max_mem = min(self.mem_cntr, self.mem_size)
 
-    def __len__(self) -> int:
-        return len(self.mem)
+        batch = torch.randperm(max_mem, requires_grad=False, device=self.device)[:batch_size]
+
+        states = self.state_memory[batch].detach()
+        next_states = self.next_state_memory[batch].detach()
+        actions = self.action_memory[batch].detach()
+        rewards = self.reward_memory[batch].detach()
+        dones = self.terminal_memory[batch].detach()
+
+        return states, actions, rewards, next_states, dones
 
 
 class Actor(nn.Module):
@@ -93,7 +111,7 @@ class Critic(nn.Module):
         )
 
         self.to(device)
-    
+
     def forward(self, state: Tensor, action: Tensor) -> Tuple[Tensor, Tensor]:
         sa = torch.cat([state, action], dim=-1)
         q1 = self.critic1(sa)
@@ -135,7 +153,7 @@ class TD3:
         self.target_actor = Actor(num_states, num_actions, hidden_dim, action_max, device=device)
         self.critic = Critic(num_states, num_actions, hidden_dim, device=device)
         self.target_critic = Critic(num_states, num_actions, hidden_dim, device=device)
-        self.replay_buffer = ReplayBuffer(mem_capacity)
+        self.replay_buffer = ReplayBuffer(mem_capacity, num_states, num_actions, device=device)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
 
@@ -179,12 +197,9 @@ class TD3:
             next_obs, reward, terminated, truncated, info = self.env.step(action.detach().cpu().numpy().flatten())
         reward = torch.tensor([reward], device=self.device, dtype=torch.float32)
         done = terminated or truncated
-        if done:
-            next_obs = None
-        else:
-            next_obs = torch.tensor(next_obs, device=self.device, dtype=torch.float32).unsqueeze(0)
+        next_obs = torch.tensor(next_obs, device=self.device, dtype=torch.float32).unsqueeze(0)
 
-        self.replay_buffer.push(obs, action, reward, next_obs)
+        self.replay_buffer.store(obs, action, reward, next_obs, done)
         return next_obs, action, reward, done
 
     def reset(self) -> Tensor:
@@ -194,20 +209,12 @@ class TD3:
         return obs.unsqueeze(0)
 
     def update(self) -> None:
-        if self.timestep < self.start_steps:
+        if self.replay_buffer.mem_cntr < self.batch_size:
             return
         self.num_update += 1
         # randomly sample from replay buffer
         sample = self.replay_buffer.sample(self.batch_size)
-        batch = self.replay_buffer.Transition(*zip(*sample))
-
-        next_state_batch = torch.cat([torch.zeros(1, self.num_states, device=self.device)
-                                      if ns is None else ns for ns in batch.next_state])
-        state_batch = torch.cat(batch.state)
-        action_batch = torch.cat(batch.action).detach()
-        reward_batch = torch.cat(batch.reward)
-        done_batch = torch.tensor([0. if ns is None else 1. for ns in batch.next_state],
-                                  device=self.device)
+        state_batch, action_batch, reward_batch, next_state_batch, done_batch = sample
 
         with torch.no_grad():
             # compute target actions
@@ -218,12 +225,12 @@ class TD3:
 
             # calculate targets
             target_q1, target_q2 = self.target_critic(next_state_batch, next_action_batch)
-            target_q = reward_batch + self.gamma * (1 - done_batch) * torch.min(target_q1.squeeze(-1),
-                                                                                target_q2.squeeze(-1))
+            target_q = reward_batch + self.gamma * (1 - done_batch.long()) * torch.min(target_q1.squeeze(-1),
+                                                                                       target_q2.squeeze(-1))
 
         # update Q-functions
         q1, q2 = self.critic(state_batch, action_batch)
-        critic_loss = F.mse_loss(q1.squeeze(-1), target_q) + F.mse_loss(q2.squeeze(-1), target_q)
+        critic_loss = F.mse_loss(target_q.unsqueeze(-1), q1) + F.mse_loss(target_q.unsqueeze(-1), q2)
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
