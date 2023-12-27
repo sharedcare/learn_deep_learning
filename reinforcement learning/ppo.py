@@ -32,8 +32,8 @@ class ReplayMemory:
         self.rewards = []
         self.values = []
         self.dones = []
-        self.advantages = torch.zeros(1, device=device)
-        self.returns = torch.zeros(1, device=device)
+        self.advantages = torch.zeros(1, dtype=torch.float32, device=device)
+        self.returns = torch.zeros(1, dtype=torch.float32, device=device)
         self.count = 0
         self.device = device
 
@@ -79,8 +79,8 @@ class ReplayMemory:
         values = torch.cat(self.values)
         dones = torch.cat(self.dones)
         advantage = 0
-        self.advantages = torch.zeros_like(rewards)
-        self.returns = torch.zeros_like(rewards)
+        self.advantages = torch.zeros_like(rewards, dtype=torch.float32)
+        self.returns = torch.zeros_like(rewards, dtype=torch.float32)
         for step in reversed(range(len(rewards))):
             if step == len(rewards) - 1:
                 next_values = last_values
@@ -90,9 +90,10 @@ class ReplayMemory:
             delta = rewards[step] + next_non_terminal * gamma * next_values - values[step]  # td error
             advantage = delta + next_non_terminal * gamma * lam * advantage  # advantage
             self.returns[step] = advantage + values[step]  # td target
-            self.advantages[step] = advantage
-            # normalize the advantages
-            self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std(dim=-1) + 1e-7)
+
+        self.advantages = self.returns - values.squeeze(-1)
+        # normalize the advantages
+        self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std(dim=-1) + 1e-7)
 
     def __len__(self) -> int:
         return len(self.states)
@@ -239,10 +240,7 @@ class PPO:
         next_obs, reward, terminated, truncated, info = self.env.step(action)
         reward = torch.tensor([reward], device=self.device)
         done = terminated or truncated
-        if done:
-            next_obs = None
-        else:
-            next_obs = torch.tensor(next_obs, device=self.device).unsqueeze(0)
+        next_obs = torch.tensor(next_obs, device=self.device).unsqueeze(0)
 
         action = torch.tensor(action, device=self.device).unsqueeze(0)
 
@@ -269,7 +267,7 @@ class PPO:
 
                 # surrogate loss
                 surrogate = -ratios * advantage_batch
-                surrogate_clipped = -torch.clamp(ratios, 1 - self.clip_param, 1 + self.clip_param)
+                surrogate_clipped = -torch.clamp(ratios, 1 - self.clip_param, 1 + self.clip_param) * advantage_batch
                 surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
                 # value loss
@@ -290,48 +288,54 @@ class PPO:
     def learn(self, num_episodes: int) -> None:
         """training process"""
         # rollout
-        episode_durations = []
+        episode_rewards = []
+        best_rewards = self.env.reward_range[0]
         episode_step = 0
         for i in range(num_episodes):
             done = False
-            episode_rewards = 0
+            episode_reward = 0
             state = self.reset()
             duration = 0
             while not done:
                 # self.env.render("human")
                 next_state, action, reward, value, done = self.step(state)
-                episode_rewards += reward.item()
-                state = next_state
+                episode_reward += reward.item()
                 duration += 1
                 episode_step += 1
                 if episode_step % self.episode_length == 0:
-                    self.replay_mem.compute_returns(value, self.gamma, self.lam)
+                    next_value = self.actor_critic.evaluate(next_state)
+                    self.replay_mem.compute_returns(next_value, self.gamma, self.lam)
                     self.update()
-                    episode_step = 0
 
-            episode_durations.append(duration + 1)
-            print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
-            
-            plot_rewards(show_result=False, episode_durations=episode_durations)
+                state = next_state
 
-        plot_rewards(show_result=True, episode_durations=episode_durations)
+            episode_rewards.append(episode_reward)
+            avg_score = np.mean(episode_rewards[-100:])
+            print("step: {}, rew: {}, avg score: {}, duration: {}".format(i + 1, episode_reward, avg_score, duration + 1))
+            plot_rewards(show_result=False, episode_rewards=episode_rewards)
+            if avg_score > best_rewards:
+                best_rewards = avg_score
+                if SAVE_MODEL_PATH:
+                    ppo.save(SAVE_MODEL_PATH)
+
+        plot_rewards(show_result=True, episode_rewards=episode_rewards)
 
 
 if __name__ == "__main__":
-    BATCH_SIZE = 4                  # sample batch size
+    BATCH_SIZE = 4                # sample batch size
     GAMMA = 0.99                    # reward discount
     LAMBDA = 0.95                   # adv rate
     LR = 1e-4                       # learning rate
-    NUM_EPISODES = 500              # number of episodes for sampling and training
+    NUM_EPISODES = 1000             # number of episodes for sampling and training
     EPISODE_LEN = 20                # total episode steps for each rollout episode
-    NUM_LEARNING_EPOCHS = 4         # number of epochs for ppo update
+    NUM_LEARNING_EPOCHS = 8         # number of epochs for ppo update
     CLIP_PARAM = 0.2                # clip factor for ppo clip
-    HIDDEN_DIM = 128                # hidden dimension size for actor-critic network
+    HIDDEN_DIM = 256                # hidden dimension size for actor-critic network
     VALUE_LOSS_COEF = 0.5           # value loss coefficient
     ENTROPY_LOSS_COEF = 0.01        # entropy loss coefficient
 
-    LOAD_MODEL_PATH = "saved_models/rl/ppo.pt"
-    SAVE_MODEL_PATH = "saved_models/rl/new_ppo.pt"
+    LOAD_MODEL_PATH = "/home/tchen/Projects/learn_deep_learning/saved_models/rl/ppo.pt"
+    SAVE_MODEL_PATH = "/home/tchen/Projects/learn_deep_learning/saved_models/rl/new_ppo.pt"
 
     gym_env = gym.make("CartPole-v1")
     n_states = gym_env.observation_space.shape[0]
@@ -367,5 +371,3 @@ if __name__ == "__main__":
     if LOAD_MODEL_PATH and os.path.exists(LOAD_MODEL_PATH):
         ppo.load(LOAD_MODEL_PATH)
     ppo.learn(NUM_EPISODES)
-    if SAVE_MODEL_PATH:
-        ppo.save(SAVE_MODEL_PATH)
