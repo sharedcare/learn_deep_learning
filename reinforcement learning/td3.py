@@ -18,7 +18,11 @@ from utils import get_device, plot_rewards
 
 
 class ReplayBuffer:
-    def __init__(self, max_size, input_shape, num_actions, device: torch.device = "cpu"):
+    def __init__(self,
+                 max_size: int,
+                 input_shape: int,
+                 num_actions: int,
+                 device: torch.device = "cpu") -> None:
         self.mem_size = max_size
         self.mem_cntr = 0
         self.state_memory = torch.zeros((self.mem_size, input_shape), device=device)
@@ -28,18 +32,23 @@ class ReplayBuffer:
         self.terminal_memory = torch.zeros(self.mem_size, dtype=torch.bool, device=device)
         self.device = device
 
-    def store(self, state, action, reward, state_, done):
+    def store(self,
+              state: Tensor,
+              action: Tensor,
+              reward: Tensor,
+              next_state: Tensor,
+              done: Tensor) -> None:
         """ save transition to buffer """
         index = self.mem_cntr % self.mem_size
         self.state_memory[index] = state
-        self.next_state_memory[index] = state_
+        self.next_state_memory[index] = next_state
         self.terminal_memory[index] = done
         self.reward_memory[index] = reward
         self.action_memory[index] = action
 
         self.mem_cntr += 1
 
-    def sample(self, batch_size):
+    def sample(self, batch_size: int) -> Tuple[Tensor, ...]:
         """ randomly sample memory buffer """
         max_mem = min(self.mem_cntr, self.mem_size)
 
@@ -59,7 +68,6 @@ class Actor(nn.Module):
                  num_states: int,
                  num_actions: int,
                  hidden_dim: int,
-                 max_action: float,
                  device: torch.device = "cpu",
                  ) -> None:
         super(Actor, self).__init__()
@@ -73,7 +81,6 @@ class Actor(nn.Module):
             nn.Tanh()
         )
 
-        self.max_action = max_action
         self.to(device)
 
     def forward(self, state: Tensor) -> Tensor:
@@ -149,8 +156,8 @@ class TD3:
         self.timestep = 0
         self.device = device
 
-        self.actor = Actor(num_states, num_actions, hidden_dim, action_max, device=device)
-        self.target_actor = Actor(num_states, num_actions, hidden_dim, action_max, device=device)
+        self.actor = Actor(num_states, num_actions, hidden_dim, device=device)
+        self.target_actor = Actor(num_states, num_actions, hidden_dim, device=device)
         self.critic = Critic(num_states, num_actions, hidden_dim, device=device)
         self.target_critic = Critic(num_states, num_actions, hidden_dim, device=device)
         self.replay_buffer = ReplayBuffer(mem_capacity, num_states, num_actions, device=device)
@@ -170,14 +177,14 @@ class TD3:
 
     def save(self, path: str) -> None:
         """save model to designated path"""
-        torch.save(self.actor.state_dict(), path + "_actor.pt")
-        torch.save(self.critic.state_dict(), path + "_critic.pt")
+        torch.save(self.actor.state_dict(), path + "td3_actor.pt")
+        torch.save(self.critic.state_dict(), path + "td3_critic.pt")
         print("model saved at: {}".format(path))
 
     def load(self, path: str) -> None:
         """load network from path"""
-        self.actor.load_state_dict(torch.load(path + "_actor.pt"))
-        self.critic.load_state_dict(torch.load(path + "_critic.pt"))
+        self.actor.load_state_dict(torch.load(path + "td3_actor.pt"))
+        self.critic.load_state_dict(torch.load(path + "td3_critic.pt"))
         self.target_actor.load_state_dict(self.actor.state_dict())
         self.target_critic.load_state_dict(self.critic.state_dict())
         print("model loaded from: {}".format(path))
@@ -251,25 +258,51 @@ class TD3:
 
     def learn(self, num_episodes: int) -> None:
         """training process"""
-        episode_durations = []
+        episode_rewards = []
+        best_rewards = self.env.reward_range[0]
         for i in range(num_episodes):
             done = False
-            episode_rewards = 0
+            episode_reward = 0
             state = self.reset()
             duration = 0
             while not done:
+                # self.env.render()
                 next_state, action, reward, done = self.step(state)
-                episode_rewards += reward.item()
+                episode_reward += reward.item()
                 state = next_state
                 self.update()
                 duration += 1
 
             self.timestep += 1
-            episode_durations.append(duration + 1)
-            print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
-            plot_rewards(show_result=False, episode_durations=episode_durations)
+            episode_rewards.append(episode_reward)
+            avg_score = np.mean(episode_rewards[-100:])
+            print("step: {}, rew: {}, avg score: {}, duration: {}".format(i + 1, episode_reward, avg_score, duration + 1))
+            plot_rewards(show_result=False, episode_rewards=episode_rewards)
+            if avg_score > best_rewards:
+                best_rewards = avg_score
+                if SAVE_MODEL_PATH:
+                    td3.save(SAVE_MODEL_PATH)
 
-        plot_rewards(show_result=True, episode_durations=episode_durations)
+        plot_rewards(show_result=True, episode_rewards=episode_rewards)
+
+    def play(self, num_episodes: int) -> None:
+        """testing process"""
+        for i in range(num_episodes):
+            done = False
+            episode_reward = 0
+            duration = 0
+            state = self.reset()
+            while not done:
+                self.env.render()
+                action = self.act(state)
+                next_state, reward, terminated, truncated, info = self.env.step(action.detach().cpu().numpy().flatten())
+                done = terminated or truncated
+                episode_reward += reward
+                duration += 1
+                next_state = torch.tensor(next_state, device=self.device)
+                state = next_state
+
+            print("episode: {}, rew: {}, duration: {}".format(i + 1, episode_reward, duration + 1))
 
 
 if __name__ == "__main__":
@@ -285,10 +318,10 @@ if __name__ == "__main__":
     EPSILON = 0.2                   # std of Gaussian exploration noise
     POLICY_DELAY = 2                # frequency of delayed policy updates
 
-    LOAD_MODEL_PATH = "saved_models/rl/td3.pt"
-    SAVE_MODEL_PATH = "saved_models/rl/new_td3.pt"
+    LOAD_MODEL_PATH = "saved_models/rl/"
+    SAVE_MODEL_PATH = "saved_models/rl/"
 
-    gym_env = gym.make("LunarLanderContinuous-v2").unwrapped
+    gym_env = gym.make("LunarLanderContinuous-v2", render_mode="human")
     n_states = gym_env.observation_space.shape[0]
     n_actions = gym_env.action_space.shape[0]
     max_action = float(gym_env.action_space.high[0])
@@ -321,6 +354,6 @@ if __name__ == "__main__":
 
     if LOAD_MODEL_PATH and os.path.exists(LOAD_MODEL_PATH):
         td3.load(LOAD_MODEL_PATH)
+
     td3.learn(NUM_EPISODES)
-    if SAVE_MODEL_PATH:
-        td3.save(SAVE_MODEL_PATH)
+    # td3.play(50)
