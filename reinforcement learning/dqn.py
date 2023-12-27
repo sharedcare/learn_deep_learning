@@ -5,6 +5,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 import copy
 import gym
 from torch import Tensor
@@ -183,25 +184,31 @@ class DQN:
 
     def learn(self, num_episodes: int) -> None:
         """training process"""
-        episode_durations = []
+        episode_rewards = []
+        best_rewards = self.env.reward_range[0]
         for i in range(num_episodes):
             done = False
-            episode_rewards = 0
+            episode_reward = 0
             state = self.reset()
             duration = 0
             while not done:
                 next_state, action, reward, done = self.step(state)
-                episode_rewards += reward.item()
+                episode_reward += reward.item()
                 state = next_state
                 self.update()
                 self.net_soft_update()
                 duration += 1
 
-            episode_durations.append(duration + 1)
-            print("step: {}, rew: {}, duration: {}".format(i + 1, episode_rewards, duration + 1))
-            plot_rewards(show_result=False, episode_durations=episode_durations)
+            episode_rewards.append(episode_reward)
+            avg_score = np.mean(episode_rewards[-100:])
+            print("step: {}, rew: {}, avg score: {}, duration: {}".format(i + 1, episode_reward, avg_score, duration + 1))
+            plot_rewards(show_result=False, episode_rewards=episode_rewards)
+            if avg_score > best_rewards:
+                best_rewards = avg_score
+                if SAVE_MODEL_PATH:
+                    dqn.save(SAVE_MODEL_PATH)
 
-        plot_rewards(show_result=True, episode_durations=episode_durations)
+        plot_rewards(show_result=True, episode_rewards=episode_rewards)
 
 
 if __name__ == "__main__":
@@ -243,5 +250,3 @@ if __name__ == "__main__":
     if LOAD_MODEL_PATH and os.path.exists(LOAD_MODEL_PATH):
         dqn.load(LOAD_MODEL_PATH)
     dqn.learn(NUM_EPISODES)
-    if SAVE_MODEL_PATH:
-        dqn.save(SAVE_MODEL_PATH)
