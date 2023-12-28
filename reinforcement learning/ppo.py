@@ -310,7 +310,7 @@ class PPO:
                 state = next_state
 
             episode_rewards.append(episode_reward)
-            avg_score = np.mean(episode_rewards[-100:])
+            avg_score = np.mean(episode_rewards[-10:])
             print("step: {}, rew: {}, avg score: {}, duration: {}".format(i + 1, episode_reward, avg_score, duration + 1))
             plot_rewards(show_result=False, episode_rewards=episode_rewards)
             if avg_score > best_rewards:
@@ -320,13 +320,32 @@ class PPO:
 
         plot_rewards(show_result=True, episode_rewards=episode_rewards)
 
+    def play(self, num_episodes: int) -> None:
+        """testing process"""
+        for i in range(num_episodes):
+            done = False
+            episode_reward = 0
+            duration = 0
+            state = self.reset()
+            while not done:
+                self.env.render()
+                action, _ = self.actor_critic.act(state)
+                next_state, reward, terminated, truncated, info = self.env.step(action.item())
+                done = terminated or truncated
+                episode_reward += reward
+                duration += 1
+                next_state = torch.tensor(next_state, device=self.device)
+                state = next_state
+
+            print("episode: {}, rew: {}, duration: {}".format(i + 1, episode_reward, duration + 1))
+
 
 if __name__ == "__main__":
     BATCH_SIZE = 4                # sample batch size
     GAMMA = 0.99                    # reward discount
     LAMBDA = 0.95                   # adv rate
     LR = 1e-4                       # learning rate
-    NUM_EPISODES = 1000             # number of episodes for sampling and training
+    NUM_EPISODES = 500             # number of episodes for sampling and training
     EPISODE_LEN = 20                # total episode steps for each rollout episode
     NUM_LEARNING_EPOCHS = 8         # number of epochs for ppo update
     CLIP_PARAM = 0.2                # clip factor for ppo clip
@@ -337,7 +356,7 @@ if __name__ == "__main__":
     LOAD_MODEL_PATH = "/home/tchen/Projects/learn_deep_learning/saved_models/rl/ppo.pt"
     SAVE_MODEL_PATH = "/home/tchen/Projects/learn_deep_learning/saved_models/rl/new_ppo.pt"
 
-    gym_env = gym.make("CartPole-v1")
+    gym_env = gym.make("CartPole-v1", render_mode="human")
     n_states = gym_env.observation_space.shape[0]
 
     if isinstance(gym_env.action_space, gym.spaces.Discrete):
@@ -370,4 +389,5 @@ if __name__ == "__main__":
 
     if LOAD_MODEL_PATH and os.path.exists(LOAD_MODEL_PATH):
         ppo.load(LOAD_MODEL_PATH)
-    ppo.learn(NUM_EPISODES)
+    # ppo.learn(NUM_EPISODES)
+    ppo.play(50)
