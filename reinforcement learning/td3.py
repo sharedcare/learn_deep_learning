@@ -275,7 +275,7 @@ class TD3:
 
             self.timestep += 1
             episode_rewards.append(episode_reward)
-            avg_score = np.mean(episode_rewards[-100:])
+            avg_score = np.mean(episode_rewards[-10:])
             print("step: {}, rew: {}, avg score: {}, duration: {}".format(i + 1, episode_reward, avg_score, duration + 1))
             plot_rewards(show_result=False, episode_rewards=episode_rewards)
             if avg_score > best_rewards:
