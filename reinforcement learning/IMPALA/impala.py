@@ -1,31 +1,41 @@
 import torch
 import gymnasium as gym
 
+from torch import Tensor
+from typing import Tuple, Optional
 from actor_critic import ActorCritic
 
 
 class RolloutBuffer(object):
-    def __init__(self,
-                 max_size: int,
-                 input_shape: int,
-                 num_actions: int,
-                 device: torch.device = "cpu") -> None:
+    def __init__(
+        self,
+        max_size: int,
+        input_shape: int,
+        num_actions: int,
+        device: torch.device = "cpu",
+    ) -> None:
         self.mem_size = max_size
         self.mem_cntr = 0
         self.state_memory = torch.zeros((self.mem_size, input_shape), device=device)
-        self.next_state_memory = torch.zeros((self.mem_size, input_shape), device=device)
+        self.next_state_memory = torch.zeros(
+            (self.mem_size, input_shape), device=device
+        )
         self.action_memory = torch.zeros((self.mem_size, num_actions), device=device)
         self.reward_memory = torch.zeros(self.mem_size, device=device)
-        self.terminal_memory = torch.zeros(self.mem_size, dtype=torch.bool, device=device)
+        self.terminal_memory = torch.zeros(
+            self.mem_size, dtype=torch.bool, device=device
+        )
         self.device = device
 
-    def store(self,
-              state: Tensor,
-              action: Tensor,
-              reward: Tensor,
-              next_state: Tensor,
-              done: Tensor) -> None:
-        """ save transition to buffer """
+    def store(
+        self,
+        state: Tensor,
+        action: Tensor,
+        reward: Tensor,
+        next_state: Tensor,
+        done: Tensor,
+    ) -> None:
+        """save transition to buffer"""
         index = self.mem_cntr % self.mem_size
         self.state_memory[index] = state
         self.next_state_memory[index] = next_state
@@ -47,7 +57,9 @@ class Actor:
         obs = torch.tensor(obs, device=self.device)
         return obs.unsqueeze(0)
 
-    def step(self, obs: Tensor) -> Tuple[Optional[Tensor], Tensor, Tensor, Tensor, bool]:
+    def step(
+        self, obs: Tensor
+    ) -> Tuple[Optional[Tensor], Tensor, Tensor, Tensor, bool]:
         """rollout one step"""
         action, logprob, value = self.act(obs)
         next_obs, reward, terminated, truncated, info = self.env.step(action)
@@ -66,7 +78,6 @@ class Actor:
 
         while True:
             self.actor_critic.load_state_dict(self.learner.actor_critic.state_dict())
-
 
 
 class Learner:
