@@ -51,7 +51,8 @@ class ActorCritic(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, 1),
         )
-        
+
+        self.distribution = None
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.to(device)
 
