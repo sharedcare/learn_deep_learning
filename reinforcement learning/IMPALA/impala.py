@@ -1,5 +1,7 @@
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
+import torch.multiprocessing as mp
 import gymnasium as gym
 
 from torch import Tensor
@@ -65,7 +67,8 @@ class RolloutBuffer(object):
 
 
 class Actor:
-    def __init__(self, env_id, learner, device):
+    def __init__(self, idx, env_id, learner, device):
+        self.idx = idx
         self.env = gym.make(env_id)
         self.rollout_buffer = RolloutBuffer()
         self.actor_critic = ActorCritic()
@@ -139,29 +142,80 @@ class Learner:
 
     def learn(self):
         torch.manual_seed(self.seed)
-        batch = []
-        best = 0
-
         while True:
             states, actions, rewards, old_logprobs, old_logits, dones = self.batch_manager.get()
-            # batch.append(trajectory)
-            policy_loss = 0.
-            value_loss = 0.
-            entropy_loss = 0.
             if len(states) < self.batch_size:
                 continue
             logprobs, values, logits = self.actor_critic.evaluate(states, actions)
             actions, old_logits, dones, rewards = actions[1:], old_logits[1:], dones[1:], rewards[1:]
-            logits, values = logits[:-1], values[:-1]
+            vs, advantages = self.v_trace(old_logprobs, logprobs, rewards, values, dones)
+            # policy loss
+            policy_loss = logprobs * advantages.detach()
+            policy_loss = policy_loss.sum()
+            # baseline loss
+            baseline_loss = self.baseline_coef * 0.5 * (vs.detach() - values[:-1]).pow(2)
+            baseline_loss = baseline_loss.sum()
+            # entropy loss
+            policy = F.softmax(logits, dim=1)
+            log_policy = F.log_softmax(logits, dim=1)
+            entropy = torch.sum(-policy * log_policy, dim=-1)
+            entropy_loss = self.entropy_coef * entropy.sum()
+            # total loss
+            loss = policy_loss + baseline_loss - entropy_loss
 
-    def v_trace(self, policy_logits, target_logits, actions, rewards, values):
-        pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+
+    def v_trace(self,
+                old_logprobs,
+                target_logprobs,
+                rewards,
+                values,
+                dones):
+        # log importance sampling weights $log(\pi(a) / \mu(a))$
+        log_rhos = target_logprobs - old_logprobs
+        rhos = torch.exp(log_rhos)
+        rho_clip = min(self.rho_clip_threshold, rhos)
+        coef_clip = torch.min(self.coef_clip_threshold, rhos)
+        # v_s = V(x_s) + \sum_{t=s}^{s+n-1} \gamma_{t-s} * \prod_{i=s}^{t-1} c_i * \delta_t
+        # \delta_t = \rho_t * (r_t + \gamma V(x_{t+1}) - V(x_t))
+        vs = []
+        for s in range(len(rewards)):
+            v_s = values[s].clone()
+            for t in range(s, len(rewards)):
+                delta = rho_clip[t] * (rewards[t] + self.gamma * dones[t] * values[t+1] - values[t])
+                v_s += torch.prod(self.gamma * dones[s:t] * coef_clip[s:t]) * delta
+            vs.append(v_s)
+        vs = torch.cat(vs, dim=0)
+        # advantage for policy gradient
+        # adv_targ = rho_s * (r_s + \gamma * v_{s+1} - V(x_s))
+        advantages = rho_clip * (rewards + self.gamma * dones * torch.cat(vs[1:], values[-1]) - values)
+        return vs, advantages
 
 
 class Impala:
     def __init__(self) -> None:
-        self.actor = ActorCritic()
-        self.learner = ActorCritic()
+        self.actors = []
+        self.learner = Learner()
+        for i in range(num_envs):
+            actor = Actor(idx=i)
+            self.actors.append(actor)
+        self.processes = []
 
-    def learn(self):
-        pass
+    def train(self):
+        batch = mp.Queue(maxsize=1)
+        for idx, actor in enumerate(self.actors):
+            p = mp.Process(target=actor.perform, args=(idx, batch))
+            p.start()
+            self.processes.append(p)
+
+        learner = mp.Process(target=self.learner.learn, args=(batch,))
+        learner.start()
+        self.processes.append(learner)
+
+        for p in self.processes:
+            p.join()
+
