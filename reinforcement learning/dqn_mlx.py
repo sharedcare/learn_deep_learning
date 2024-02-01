@@ -14,7 +14,7 @@ from typing import List, Tuple, Optional
 
 sys.path.append("./")
 
-from utils import get_device, plot_rewards
+from utils import plot_rewards
 
 
 class ReplayBuffer(object):
@@ -44,19 +44,25 @@ class Net(nn.Module):
         device: mx.Device = mx.default_device,
     ) -> None:
         super(Net, self).__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(num_states, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, num_actions),
-        )
+        layer_sizes = [num_states] + [hidden_dim] * 2 + [num_actions]
+        self.layers = [
+            nn.Linear(idim, odim)
+            for idim, odim in zip(layer_sizes[:-1], layer_sizes[1:])
+        ]
         self.device = device
-        self.to(self.device)
 
-    def forward(self, x: array) -> array:
-        action_value = self.layers(x)
-        return action_value
+    def __call__(self, x: array) -> array:
+        for l in self.layers[:-1]:
+            x = nn.relu(l(x))
+        return self.layers[-1](x)
+
+    def load_weights_dict(self, model: nn.Module) -> None:
+        for i, layer in enumerate(model.layers):
+            weight = [
+                ("weight", layer.parameters()["weight"]),
+                ("bias", layer.parameters()["bias"]),
+            ]
+            self.layers[i].load_weights(weight)
 
 
 class DQN:
@@ -82,7 +88,7 @@ class DQN:
         self.num_actions = num_actions
         self.policy_net = Net(num_states, num_actions, hidden_dim, device)
         self.target_net = Net(num_states, num_actions, hidden_dim, device)
-        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.load_weights_dict(self.policy_net)
         self.mem_capacity = mem_capacity
         self.batch_size = batch_size
         self.device = device
@@ -95,7 +101,7 @@ class DQN:
         self.lr = lr
 
         self.replay_buffer = ReplayBuffer(mem_capacity)
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.lr)
+        self.optimizer = optim.Adam(learning_rate=self.lr)
 
         self.steps_done = 0
 
@@ -117,23 +123,23 @@ class DQN:
         )
         self.steps_done += 1
         if random.random() > epsilon:
-            with self.policy_net.eval():
-                action_value = self.policy_net(obs)
-                action = mx.maximum(action_value, 1)[1]
-                return action.view(1, 1)
+            self.policy_net.eval()
+            action_value = self.policy_net(obs)
+            action = mx.argmax(action_value, 1)
+            return mx.expand_dims(action, 0)
         else:
-            return array([[self.env.action_space.sample()]], device=self.device)
+            return mx.array([[self.env.action_space.sample()]])
 
     def step(self, obs: array) -> Tuple[Optional[array], array, array, bool]:
         """rollout one step"""
         action = self.act(obs)
         next_obs, reward, terminated, truncated, info = self.env.step(action.item())
-        reward = array([reward], device=self.device)
+        reward = mx.array([reward])
         done = terminated or truncated
         if done:
             next_obs = None
         else:
-            next_obs = array(next_obs, device=self.device).unsqueeze(0)
+            next_obs = mx.expand_dims(array(next_obs), 0)
 
         self.replay_buffer.push(obs, action, reward, next_obs)
         return next_obs, action, reward, done
@@ -141,8 +147,8 @@ class DQN:
     def reset(self) -> array:
         """env reset"""
         obs, info = self.env.reset()
-        obs = array(obs, device=self.device)
-        return obs.unsqueeze(0)
+        obs = mx.array(obs)
+        return mx.expand_dims(obs, 0)
 
     def net_soft_update(self):
         """
@@ -150,13 +156,18 @@ class DQN:
         θ′ ← τ θ + (1 −τ )θ′
 
         """
-        update_state_dict = copy.deepcopy(self.target_net.parameters())
-        for key in update_state_dict.keys():
-            update_state_dict[key] = (
-                self.target_net.parameters()[key] * (1 - self.tau)
-                + self.policy_net.parameters()[key] * self.tau
+        for i in range(len(self.target_net.parameters().copy()["layers"])):
+            update_weight = (
+                "weight",
+                self.target_net.layers[i].parameters()["weight"] * (1 - self.tau)
+                + self.policy_net.layers[i].parameters()["weight"] * self.tau,
             )
-        self.target_net.load_weights(update_state_dict)
+            update_bias = (
+                "bias",
+                self.target_net.layers[i].parameters()["bias"] * (1 - self.tau)
+                + self.policy_net.layers[i].parameters()["bias"] * self.tau,
+            )
+            self.target_net.layers[i].load_weights([update_weight, update_bias])
 
     def update(self) -> None:
         """update policy network"""
@@ -168,7 +179,7 @@ class DQN:
 
         next_state_batch = mx.concatenate(
             [
-                mx.zeros(1, self.num_states, device=self.device) if ns is None else ns
+                mx.zeros((1, self.num_states)) if ns is None else ns
                 for ns in batch.next_state
             ]
         )
@@ -177,21 +188,23 @@ class DQN:
         reward_batch = mx.concatenate(batch.reward)
 
         # Q(s_t, a): compute Q(s) and select taken actions as state action values
-        state_action_values = self.policy_net(state_batch).gather(1, action_batch)
+        state_action_values = mx.take_along_axis(self.policy_net(state_batch), action_batch, 1)
 
         # V(s_{t+1}): \max_a Q(s_{t+1}, a)
-        next_state_values = mx.maximum(self.target_net(next_state_batch), 1)[0]
+        next_state_values = mx.max(self.target_net(next_state_batch), 1)
 
         # Expected Q(s,a): r + \gamma V(s_{t+1}) using Bellman equation
         expected_state_action_values = reward_batch + self.gamma * next_state_values
 
         # TD error: Q(s_t, a) - Expected Q(s, a)
-        criterion = nn.SmoothL1Loss()
-        loss = criterion(state_action_values.squeeze(1), expected_state_action_values)
+        self.policy_net.train()
+        loss_fn = nn.losses.smooth_l1_loss
+        loss_and_grad_fn = nn.value_and_grad(self.policy_net, loss_fn)
+        loss, grads = loss_and_grad_fn(
+            state_action_values.squeeze(1), expected_state_action_values
+        )
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        self.optimizer.update(self.policy_net, gradients=grads)
 
     def learn(self, num_episodes: int) -> None:
         """training process"""
@@ -238,14 +251,14 @@ if __name__ == "__main__":
     NUM_EPISODES = 500  # number of episodes for sampling and training
     HIDDEN_DIM = 128  # hidden dimension size for Q-network
 
-    LOAD_MODEL_PATH = "saved_models/rl/dqn.pt"
-    SAVE_MODEL_PATH = "saved_models/rl/new_dqn.pt"
+    LOAD_MODEL_PATH = "saved_models/rl/dqn.npz"
+    SAVE_MODEL_PATH = "saved_models/rl/new_dqn.npz"
 
     gym_env = gym.make("CartPole-v1").unwrapped
     n_states = gym_env.observation_space.shape[0]
     n_actions = gym_env.action_space.n
 
-    run_device = get_device()
+    run_device = mx.default_device
 
     dqn = DQN(
         env=gym_env,
