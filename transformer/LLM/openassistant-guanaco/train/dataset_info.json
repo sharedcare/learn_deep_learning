@@ -1,0 +1,48 @@
+{
+  "builder_name": "json",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "openassistant-guanaco",
+  "dataset_size": 16648581,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/timdettmers/openassistant-guanaco@831dabac2283d99420cda0b673d7a2a43849f17a/openassistant_best_replies_train.jsonl": {
+      "num_bytes": 20877686,
+      "checksum": null
+    },
+    "hf://datasets/timdettmers/openassistant-guanaco@831dabac2283d99420cda0b673d7a2a43849f17a/openassistant_best_replies_eval.jsonl": {
+      "num_bytes": 1105272,
+      "checksum": null
+    }
+  },
+  "download_size": 21982958,
+  "features": {
+    "text": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 38631539,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 15808615,
+      "num_examples": 9846,
+      "dataset_name": "openassistant-guanaco"
+    },
+    "test": {
+      "name": "test",
+      "num_bytes": 839966,
+      "num_examples": 518,
+      "dataset_name": "openassistant-guanaco"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
