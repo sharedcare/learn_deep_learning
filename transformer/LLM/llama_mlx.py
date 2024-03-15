@@ -7,9 +7,6 @@ from mlx.core import array
 from transformers.activations import ACT2FN
 
 
-def apply_rotary_emb(q: array, k: array, freq_cis: array) -> Tuple[array, array]:
-    pass
-
 def repeat_kv(x, repeats):
     batch_size, seq_len, n_kv_heads, head_dim = x.shape
     if repeats == 1:
@@ -129,19 +126,25 @@ class MultiHeadAttention(nn.Module):
             n_kv_heads=args.num_key_value_heads,
             head_dim=self.d_k,
         )
+        self.rope = nn.RoPE(
+            args.head_dim, traditional=args.rope_traditional, base=args.rope_theta
+        )
 
     def __call__(
         self, q: array, k: array, v: array, attn_mask: Optional[array] = None
     ) -> Tuple[array, array]:
-        query = self.w_q(q)
-        key = self.w_k(k)
-        value = self.w_v(v)
+        queries = self.w_q(q)
+        keys = self.w_k(k)
+        values = self.w_v(v)
 
-        context, attn = self.attention(query, key, value, attn_mask)
+        queries = self.rope(queries)
+        keys = self.rope(keys)
 
-        # Add & Norm
-        context += q
-        output = nn.LayerNorm(self.d_mode)(self.out_layer(context))
+        keys = repeat_kv(keys, self.repeats)
+        values = repeat_kv(values, self.repeats)
+
+        context, attn = self.attention(queries, keys, values, attn_mask)
+        output = self.w_o(context)
         return output, attn
 
 
@@ -165,3 +168,4 @@ class Feedforward(nn.Module):
 
     def __call__(self, x):
         return self.w2(self.act(self.w1(x)) * self.w3(x))
+
