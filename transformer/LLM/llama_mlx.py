@@ -40,6 +40,10 @@ class ModelArgs:
 
     max_position_embeddings: int = 2048
 
+    # RoPE params
+    rope_theta: float = 10000.0
+    rope_scaling: float = 1.0
+
     device: mx.Device = None
 
 
@@ -127,15 +131,15 @@ class MultiHeadAttention(nn.Module):
             head_dim=self.d_k,
         )
         self.rope = nn.RoPE(
-            args.head_dim, traditional=args.rope_traditional, base=args.rope_theta
+            args.head_dim, base=args.rope_theta
         )
 
     def __call__(
-        self, q: array, k: array, v: array, attn_mask: Optional[array] = None
+        self, x: array, attn_mask: Optional[array] = None
     ) -> Tuple[array, array]:
-        queries = self.w_q(q)
-        keys = self.w_k(k)
-        values = self.w_v(v)
+        queries = self.w_q(x)
+        keys = self.w_k(x)
+        values = self.w_v(x)
 
         queries = self.rope(queries)
         keys = self.rope(keys)
@@ -168,4 +172,22 @@ class Feedforward(nn.Module):
 
     def __call__(self, x):
         return self.w2(self.act(self.w1(x)) * self.w3(x))
+
+
+class DecoderBlock(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.attention = MultiHeadAttention(args)
+        self.ffn = Feedforward(args)
+
+        self.attn_norm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.ffn_norm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+
+    def __call__(self, x, attn_mask):
+        # Add & Norm
+        x = self.attn_norm(x)
+        hidden_states = x + self.attention(x, attn_mask)
+        hidden_states = self.ffn_norm(hidden_states)
+        out = hidden_states + self.ffn(hidden_states)
+        return out
 
