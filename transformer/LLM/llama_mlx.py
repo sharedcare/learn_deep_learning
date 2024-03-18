@@ -29,6 +29,12 @@ def repeat_kv(x, repeats):
         x = x.reshape([batch_size, seq_len, n_kv_heads * repeats, head_dim])
         return x
 
+def sample(logits: array, temperature: int = 1.0) -> array:
+    if temperature == 0:
+        return mx.argmax(logits, axis=-1)
+    else:
+        return mx.random.categorical(logits * (1 / temperature))
+
 
 @dataclass
 class ModelArgs:
@@ -157,8 +163,8 @@ class MultiHeadAttention(nn.Module):
         )
 
     def __call__(
-        self, x: array, attn_mask: Optional[array] = None, cache: Optional[Tuple[array, array]] = None,
-    ) -> Tuple[array, array]:
+        self, x: array, attn_mask: Optional[array] = None, start_pos: Optional[int] = None,
+    ) -> array:
         batch_size, seq_len, _ = x.shape
         # x, queries: (bs, seq_len, hidden_size)
         queries = self.w_q(x)
@@ -172,7 +178,7 @@ class MultiHeadAttention(nn.Module):
         keys = keys.reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
         values = values.reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
 
-        if cache is None:
+        if start_pos is None:
             # train and fine-tune
             # queries: (bs, seq_len, hidden_size) -> (bs, n_heads, head_dim)
             queries = self.rope(queries)
@@ -238,12 +244,15 @@ class DecoderBlock(nn.Module):
         self.attn_norm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.ffn_norm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
-    def __call__(self, x: array, attn_mask: Optional[array] = None) -> array:
+    def __call__(self,
+                 x: array,
+                 attn_mask: Optional[array] = None,
+                 start_pos: Optional[int] = None) -> array:
         # Norm & Add
         # x is input token embedding with shape (bs, seq_len, hidden_size)
         x = self.attn_norm(x)
         # hidden_states: (bs, seq_len, hidden_size)
-        hidden_states = x + self.attention(x, attn_mask)
+        hidden_states = x + self.attention(x, attn_mask, start_pos)
         hidden_states = self.ffn_norm(hidden_states)
         # out: (bs, seq_len, hidden_size)
         out = hidden_states + self.ffn(hidden_states)
@@ -262,8 +271,10 @@ class Llama(nn.Module):
         self.output = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(self, x: array) -> array:
+        # training
         # x is input token with shape (bs, seq_len)
-        # attn_mask: (seq_len,)
+        batch_size, seq_len = x.shape
+        # attn_mask: (seq_len, seq_len)
         attn_mask = nn.MultiHeadAttention.create_additive_causal_mask(x.shape[1])
         attn_mask = attn_mask.astype(self.tok_embeddings.weight.dtype)
         # hidden_states: (bs, seq_len, hidden_size)
@@ -276,3 +287,30 @@ class Llama(nn.Module):
         # out: (bs, seq_len, vocab_size)
         out = self.output(hidden_states).astype(mx.float16)
         return out
+
+    def generate(self,
+                 x: array,
+                 max_gen_len: int,
+                 temperature: float = 0.8,
+                 top_p: float = 0.95,
+                 start_pos: int = 0):
+        # inference
+        # x is input prompt with shape (bs, seq_len)
+        batch_size, seq_len = x.shape
+        # hidden_states: (bs, seq_len, hidden_size)
+        hidden_states = self.tok_embeddings(x)
+
+        attn_mask = None
+        if seq_len > 1:
+            attn_mask = mx.full(
+                (1, 1, seq_len, seq_len), float("-inf")
+            )
+            attn_mask = mx.triu(attn_mask, k=start_pos + 1).astype(self.tok_embeddings.weight.dtype)
+
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, attn_mask, start_pos)
+        hidden_states = self.norm(hidden_states)
+        # out: (bs, 1, vocab_size)
+        out = self.output(hidden_states[:, -1, :]).astype(mx.float32)
+        out = sample(out)
+        yield out
