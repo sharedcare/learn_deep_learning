@@ -9,11 +9,35 @@ class DeepCacheSDHelper(object):
         self.function_dict = {}
         self.cached_output = {}
         self.start_timestep = None
+        self.num_steps = 0
+        self.cache_interval = 1
+        self.cache_layer_id = 0
+        self.cache_block_id = 0
+        self.skip_mode = "uniform"
+
+    def is_skip_step(self, block_i, layer_i, blocktype="down"):
+        self.start_timestep = (
+            self.cur_timestep if self.start_timestep is None else self.start_timestep
+        )  # For some pipeline that the first timestep != 0
+        if self.skip_mode == "uniform":
+            if (self.cur_timestep - self.start_timestep) % self.cache_interval == 0:
+                return False
+        if block_i > self.cache_block_id or blocktype == "mid":
+            return True
+        if block_i < self.cache_block_id:
+            return False
+        return (
+            layer_i >= self.cache_layer_id
+            if blocktype == "down"
+            else layer_i > self.cache_layer_id
+        )
 
     def wrap_unet_forward(self):
         self.function_dict["unet_forward"] = self.sd.unet.__call__
         def wrapped_forward(*args, **kwargs):
-            self.cur_timestep = list(self.sd.sampler.timesteps).index(args[1].item())
+            self.cur_timestep = [t_prev for t, t_prev in self.sd.sampler.timesteps(self.num_steps, self.start_timestep)].index(
+                args[1].item()
+            )
             result = self.function_dict['unet_forward'](*args, **kwargs)
             return result
         self.sd.unet.__call__ = wrapped_forward
