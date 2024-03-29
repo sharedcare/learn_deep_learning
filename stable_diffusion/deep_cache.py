@@ -1,5 +1,5 @@
 import mlx.core as mx
-from stable_diffusion.stable_diffusion import StableDiffusion
+from stable_diffusion import StableDiffusion
 
 
 class DeepCacheSDHelper(object):
