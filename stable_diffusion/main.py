@@ -54,7 +54,7 @@ if __name__ == "__main__":
     helper.skip_mode = 'uniform'
 
     start_time = time.time()
-
+    helper.wrap_modules()
     latents = sd.generate_latents(
         prompt,
         n_images=4,

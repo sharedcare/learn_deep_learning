@@ -69,9 +69,8 @@ class DeepCacheSDHelper(object):
                 self.wrap_block_forward(attention, "attentions", block_i, layer_i)
             for layer_i, resnet in enumerate(getattr(block, "resnets", [])):
                 self.wrap_block_forward(resnet, "resnet", block_i, layer_i)
-            for downsampler in (
-                getattr(block, "downsample", []) if block.downsample else []
-            ):
+            downsampler = getattr(block, "downsample", [])
+            if downsampler:
                 self.wrap_block_forward(
                     downsampler,
                     "downsample",
@@ -80,9 +79,17 @@ class DeepCacheSDHelper(object):
                 )
             self.wrap_block_forward(block, "block", block_i, 0, blocktype="down")
         # 3. wrap midblock forward
-        self.wrap_block_forward(
-            self.sd.unet.mid_block, "mid_block", 0, 0, blocktype="mid"
-        )
+        for block_i, block in enumerate(self.sd.unet.mid_blocks):
+            attention = getattr(block, "attentions", [])
+            if attention:
+                self.wrap_block_forward(
+                    attention, "mid_attentions", block_i, layer_i, blocktype="mid"
+                )
+            resnet = getattr(block, "resnets", [])
+            if resnet:
+                self.wrap_block_forward(
+                    resnet, "mid_resnet", block_i, layer_i, blocktype="mid"
+                )
         # 4. wrap upblock forward
         block_num = len(self.sd.unet.up_blocks)
         for block_i, block in enumerate(self.sd.unet.up_blocks):
@@ -103,9 +110,8 @@ class DeepCacheSDHelper(object):
                     layer_num - layer_i - 1,
                     blocktype="up",
                 )
-            for upsampler in (
-                getattr(block, "upsample", []) if block.upsample else []
-            ):
+            upsampler = getattr(block, "upsample", [])
+            if upsampler:
                 self.wrap_block_forward(
                     upsampler, "upsample", block_num - block_i - 1, 0, blocktype="up"
                 )
