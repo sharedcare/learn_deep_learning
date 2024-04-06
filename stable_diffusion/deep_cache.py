@@ -10,7 +10,7 @@ class DeepCacheSDHelper(object):
         self.cached_output = {}
         self.start_timestep = None
         self.num_steps = 0
-        self.cache_interval = 1
+        self.cache_interval = 3
         self.cache_layer_id = 0
         self.cache_block_id = 0
         self.skip_mode = "uniform"
@@ -33,17 +33,17 @@ class DeepCacheSDHelper(object):
         )
 
     def wrap_unet_forward(self):
-        self.function_dict["unet_forward"] = self.sd.unet.__call__
+        self.function_dict["unet_forward"] = self.sd.unet.forward
         def wrapped_forward(*args, **kwargs):
-            self.cur_timestep = [t_prev for t, t_prev in self.sd.sampler.timesteps(self.num_steps, self.start_timestep)].index(
-                args[1].item()
+            self.cur_timestep = [t for t, t_prev in self.sd.sampler.timesteps(self.num_steps, self.start_timestep)].index(
+                int(args[1][0].item())
             )
             result = self.function_dict['unet_forward'](*args, **kwargs)
             return result
-        self.sd.unet.__call__ = wrapped_forward
+        self.sd.unet.forward = wrapped_forward
 
     def wrap_block_forward(self, block, block_name, block_i, layer_i, blocktype="down"):
-        self.function_dict[(blocktype, block_name, block_i, layer_i)] = block.__call__
+        self.function_dict[(blocktype, block_name, block_i, layer_i)] = block.forward
 
         def wrapped_forward(*args, **kwargs):
             skip = self.is_skip_step(block_i, layer_i, blocktype)
@@ -58,7 +58,7 @@ class DeepCacheSDHelper(object):
                 self.cached_output[(blocktype, block_name, block_i, layer_i)] = result
             return result
 
-        block.__call__ = wrapped_forward
+        block.forward = wrapped_forward
 
     def wrap_modules(self):
         # 1. wrap unet forward
