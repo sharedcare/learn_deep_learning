@@ -14,6 +14,6 @@ TODO List:
 TODO List:
 - [x] DQN
 - [x] Llama model
+- [x] DeepCache
 - [ ] LoRA and QLoRA
-- [ ] DeepCache
 - [ ] DiT
