@@ -65,7 +65,7 @@ def generate_image(
 
 
 if __name__ == "__main__":
-    prompt = "a photo of a Porche car on the Moon"
+    prompt = "a photo of an F1 car on the circuit"
     steps = 50
     cfg = 7.5
     sd = StableDiffusion("stabilityai/stable-diffusion-2-1-base", float16=True)
