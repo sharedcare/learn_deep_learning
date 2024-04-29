@@ -113,13 +113,14 @@ class CogVLMAgent(MultimodalConversableAgent):
         # The formats for CogVLM and GPT are different. So, we manually handle them here.
         out = ""
         retry = 10
+        config = self.llm_config["config_list"][0]
         while len(out) == 0 and retry > 0:
             # image names will be inferred automatically from cog_vlm_call
             out = cog_vlm_call(
                 messages=messages,
-                config_list=self.llm_config["config_list"],
-                max_new_tokens=self.llm_config.get("max_new_tokens", 2000),
-                temperature=self.llm_config.get("temperature", 0.8),
+                config=config,
+                max_new_tokens=config.get("max_new_tokens", 2000),
+                temperature=config.get("temperature", 0.8),
                 use_stream=False,
             )
             retry -= 1

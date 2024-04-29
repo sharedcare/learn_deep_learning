@@ -1,9 +1,11 @@
 from typing import Dict, Optional, Union
 
 from autogen import Agent, AssistantAgent, UserProxyAgent, config_list_from_json
+from vision_agent import CogVLMAgent
 import chainlit as cl
 
-TASK = "Pick a bottle of water on the table."
+TASK = """Pick a bottle of water on the table.
+<img img_url.jpg>."""
 
 
 async def ask_helper(func, **kwargs):
@@ -13,7 +15,7 @@ async def ask_helper(func, **kwargs):
     return res
 
 
-class ChainlitAssistantAgent(AssistantAgent):
+class ChainlitVisionAgent(CogVLMAgent):
     def send(
         self,
         message: Union[Dict, str],
@@ -24,10 +26,10 @@ class ChainlitAssistantAgent(AssistantAgent):
         cl.run_sync(
             cl.Message(
                 content=f'*Sending message to "{recipient.name}":*\n\n{message}',
-                author="AssistantAgent",
+                author="VisionAgent",
             ).send()
         )
-        super(ChainlitAssistantAgent, self).send(
+        super(ChainlitVisionAgent, self).send(
             message=message,
             recipient=recipient,
             request_reply=request_reply,
@@ -92,8 +94,10 @@ class ChainlitUserProxyAgent(UserProxyAgent):
 @cl.on_chat_start
 async def on_chat_start():
     config_list = config_list_from_json(env_or_file="OAI_CONFIG_LIST")
-    assistant = ChainlitAssistantAgent(
-        "assistant", llm_config={"config_list": config_list}
+    assistant = ChainlitVisionAgent(
+        name="vision_assistant",
+        system_message="A vision assistant",
+        llm_config={"config_list": config_list}
     )
     user_proxy = ChainlitUserProxyAgent(
         "user_proxy",
