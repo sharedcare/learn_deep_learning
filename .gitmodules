@@ -1,0 +1,3 @@
+[submodule "agents/embodied_ai"]
+	path = agents/embodied_ai
+	url = https://github.com/sharedcare/embodied_ai.git
