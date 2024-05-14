@@ -1,9 +1,24 @@
+import os
+from pathlib import Path
 from langchain.chains.llm import LLMChain
 from langchain.prompts import PromptTemplate
-from langchain_community.llms.ollama import Ollama
+from langchain_community.chat_models import ChatOpenAI
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.document_loaders import ArxivLoader
+from langchain_community.embeddings import HuggingFaceInstructEmbeddings
+from langchain_community.document_loaders import ArxivLoader, PyPDFLoader
+
+os.environ["OPENAI_API_BASE"] = "LINK"
+os.environ["OPENAI_API_KEY"] = "KEY"
+
+def read_pdf(file_path):
+    pdf_search = Path(file_path).glob("*.pdf")
+    pdf_files  = [str(file.absolute()) for file in pdf_search]
+    print('Total PDF files',len(pdf_files))
+    pages = []
+    for pdf in pdf_files:
+        loader = PyPDFLoader(pdf)
+        pages.extend(loader.load_and_split())
+    return pages
 
 def read_docs(arxiv_query: str):
     docs = ArxivLoader(query=arxiv_query).load_and_split()
@@ -35,7 +50,9 @@ if __name__ == "__main__":
     arxiv_id = "1605.08386"
     docs = read_docs(arxiv_id)
 
-    embeddings  =   OpenAIEmbeddings()
+    embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-large",
+                                               encode_kwargs={'normalize_embeddings': False})
+    # embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
     # FAISS vector database converts the chunks using the embeddings_model
     db = FAISS.from_documents(docs, embeddings)
 
@@ -51,4 +68,4 @@ if __name__ == "__main__":
     Use the context: {context} for the question: {question} to generate the answer.
     Helpful Answer:"""
 
-    llm = Ollama(model="llama3")
+    llm = ChatOpenAI(model="model_name")
