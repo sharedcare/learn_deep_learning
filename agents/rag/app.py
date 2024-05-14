@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from termcolor import colored
 from langchain.chains.llm import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain_community.chat_models import ChatOpenAI
@@ -47,20 +48,23 @@ def rag_pipeline(query, retriever, topk, llm, reader_template):
     return answer
 
 if __name__ == "__main__":
-    arxiv_id = "1605.08386"
+    arxiv_id = "1706.03762"
     docs = read_docs(arxiv_id)
 
-    embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-large",
-                                               encode_kwargs={'normalize_embeddings': False})
+    embeddings = HuggingFaceInstructEmbeddings(
+        model_name="hkunlp/instructor-large",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": False},
+    )
     # embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
     # FAISS vector database converts the chunks using the embeddings_model
     db = FAISS.from_documents(docs, embeddings)
 
-    # DEFINING RETRIEVER 
+    # DEFINING RETRIEVER
     retriever = db.as_retriever()
 
     # DEFINING READER LLM
-    previous_reader_template = """As a Question answering assitant, generate an answer to the input question using the context provided.
+    reader_template = """As a Question answering assitant, generate an answer to the input question using the context provided.
     Follow the below guidelines while answering the question.
     - Use the context to answer the question. Do not answer out of the context available.
     - Be concise and clear in your language.
@@ -69,3 +73,25 @@ if __name__ == "__main__":
     Helpful Answer:"""
 
     llm = ChatOpenAI(model="model_name")
+
+    # run pipeline
+    questions = [
+        "What is attention mechanism",
+        "What is self-attention",
+        "How is transformer formed",
+        "Why do we use Softmax in Transformers",
+    ]
+
+    for query in questions:
+        print(
+            colored(
+                f"Query: {query}", "red"
+            )
+        )
+        print(
+            colored(
+                f"Answer: {rag_pipeline(query, retriever, 4, llm, reader_template)}",
+                "blue",
+            )
+        )
+        print("###########" * 4)
