@@ -1,154 +1,50 @@
-""" Refer to https://langchain114.com/docs/expression_language/cookbook/retrieval
-"""
-
-import os
-from pathlib import Path
-from dotenv import load_dotenv
-from operator import itemgetter
-from termcolor import colored
-from langchain.memory import ConversationBufferMemory
-from langchain.schema import format_document
-from langchain.schema.messages import get_buffer_string
-from langchain.schema.runnable import RunnablePassthrough, RunnableLambda
-from langchain.schema.output_parser import StrOutputParser
-from langchain.prompts import PromptTemplate, ChatPromptTemplate
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.chat_models import ChatOpenAI
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceInstructEmbeddings
-from langchain_community.document_loaders import ArxivLoader, PyPDFLoader
-
-load_dotenv()
-
-os.environ["OPENAI_API_BASE"] = os.getenv("OPENAI_API_BASE")
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-
-DEFAULT_DOCUMENT_PROMPT = PromptTemplate.from_template(template="{page_content}")
+import langchain
+import streamlit as st
+from langchain.globals import set_llm_cache
+from chain import *
 
 
-def _combine_documents(docs, document_prompt=DEFAULT_DOCUMENT_PROMPT, document_separator="\n\n"):
-    doc_strings = [format_document(doc, document_prompt) for doc in docs]
-    return document_separator.join(doc_strings)
+@st.cache_resource
+def create_llm_cache():
+    return fetch_llm_cache()
 
 
-def read_pdf(file_path):
-    pdf_search = Path(file_path).glob("*.pdf")
-    pdf_files = [str(file.absolute()) for file in pdf_search]
-    print("Total PDF files", len(pdf_files))
-    pages = []
-    for pdf in pdf_files:
-        loader = PyPDFLoader(pdf)
-        pages.extend(loader.load_and_split())
-    return pages
+@st.cache_resource
+def create_vector_db(arxiv_query: str, num_docs: int) -> FAISS:
+    docs = read_docs(arxiv_query, num_docs)
+    db = get_vector_db(docs)
+    st.session_state["db"] = db
+    return db
 
 
-def read_docs(arxiv_query: str):
-    raw_docs = ArxivLoader(query=arxiv_query,
-                       load_max_docs=10,
-                       load_all_available_meta=True).load()
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100,
-        length_function=len,
-        add_start_index=True,
-    )
-    docs = text_splitter.split_documents(raw_docs)
-    print("Total arxiv pages:", len(docs))
-    return docs
+def reset_app():
+    st.session_state["query"] = ""
+    st.session_state["topic"] = ""
+    st.session_state["messages"].clear()
+
+    db = st.session_state["db"]
+    if db is not None:
+        ...
+        st.session_state["db"] = None
 
 
-def get_conversation_chain(llm, template):
-    prompt = PromptTemplate.from_template(template=template)
+def clear_cache():
+    if not st.session_state["query_llm"]:
+        st.warning("Could not find query_llm to clear cache of")
+    query_llm = st.session_state["query_llm"]
+    query_llm_string = query_llm._get_llm_string()
+    langchain.llm_cache.clear(llm_string=query_llm_string)
 
-    llm_chain = prompt | llm
-
-    standalone_question_chain = (
-        {
-            "question": lambda x: x["question"],
-            "chat_history": lambda x: get_buffer_string(x["chat_history"]),
-        }
-        | llm_chain
-        | StrOutputParser()
-    )
-
-    return standalone_question_chain
+    if not st.session_state["llm"]:
+        st.warning("Could not find llm to clear cache of")
+    llm = st.session_state["llm"]
+    llm_string = llm._get_llm_string()
+    langchain.llm_cache.clear(llm_string=llm_string)
 
 
-def get_reader_chain(llm, reader_template, retriever):
-    # 1. Generate the prompt using prompt template
-    reader_prompt = ChatPromptTemplate.from_template(template=reader_template)
-
-    # 2. Use LCEL to create a chain of the LLM with the prompt template
-    llm_chain = reader_prompt | llm
-
-    # 3. Pass the retrieved documents as the context and the input query to the LLM Chain created in step 2
-    reader = {
-        "docs": retriever,
-        "question": lambda x: x,
-    }
-
-    chat_model = {"context": lambda x: _combine_documents(x["docs"]), "question": itemgetter("question")}
-
-    answer = {
-        "answer": chat_model | llm_chain,
-        "docs": itemgetter("docs"),
-    }
-
-    # 4. Return the reader_chain in LCEL
-    return reader, answer
-
-
-def rag_pipeline(query, retriever, query_llm, llm, conversation_template, reader_template, memory):
-    # load the memory to access chat history
-    loaded_memory = RunnablePassthrough.assign(
-        chat_history=RunnableLambda(memory.load_memory_variables) | itemgetter("history"),
-    )
-    standalone_question_chain = get_conversation_chain(query_llm, conversation_template)
-    reader, answer = get_reader_chain(llm, reader_template, retriever)
-    rag_chain = loaded_memory | standalone_question_chain | reader | answer
-    inputs = {"question": query}
-    result = {}
-    answer = ""
-    curr_key = None
-    # result = rag_chain.invoke(inputs)
-    for chunk in rag_chain.stream(inputs):
-        for key in chunk:
-            if key not in result:
-                result[key] = chunk[key]
-            else:
-                result[key] += chunk[key]
-            if key == 'answer':
-                if key != curr_key:
-                    print(
-                        colored(f"\nAnswer: {chunk[key].content}", "blue"),
-                        end="",
-                        flush=True,
-                    )
-                else:
-                    print(colored(chunk[key].content, "blue"), end="", flush=True)
-                answer += chunk[key].content
-            curr_key = key
-    print()
-    # save the current question and answer to memory as chat history
-    memory.save_context(inputs, {"answer": answer})
-
-
-if __name__ == "__main__":
-    arxiv_id = "1706.03762"
-    docs = read_docs(arxiv_id)
-
-    embeddings = HuggingFaceInstructEmbeddings(
-        model_name=os.getenv("EMBEDDING_MODEL"),
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": False},
-    )
-    # embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
-    # FAISS vector database converts the chunks using the embeddings_model
-    db = FAISS.from_documents(docs, embeddings)
-
-    # DEFINING RETRIEVER
-    retriever = db.as_retriever()
-
+def setup_ui():
+    set_llm_cache(create_llm_cache())
+    # get prompt template
     # init memory
     memory = ConversationBufferMemory(return_messages=True, output_key="answer", input_key="question")
 
@@ -187,23 +83,101 @@ if __name__ == "__main__":
         model_kwargs={"stop": ["<|eot_id|>"]},
     )
 
-    # run pipeline
-    questions = [
-        "What is attention mechanism",
-        "How does it work in self-attention",
-        "How is transformer formed",
-        "Why do we use Softmax in this",
-    ]
+    # Defining default values
+    default_question = ""
+    default_answer = ""
+    defaults = {
+        "response": {"choices": [{"text": default_answer}]},
+        "question": default_question,
+        "context": [],
+        "chain": None,
+        "arxiv_topic": "",
+        "arxiv_query": "",
+        "db": None,
+        "llm": None,
+        "messages": [],
+    }
 
-    for query in questions:
-        print(colored(f"Query: {query}", "red"))
-        rag_pipeline(
-            query,
-            retriever,
-            query_llm,
-            llm,
-            CONVERSATION_TEMPLATE,
-            CITATIONS_TEMPLATE,
-            memory,
-        )
-        print("###########" * 4)
+    # Checking if keys exist in session state, if not, initializing them
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+    with st.sidebar:
+        st.write("## LLM Settings")
+        ##st.write("### Prompt") TODO make possible to change prompt
+        st.write("Change these before you run the app!")
+        st.slider("Number of Tokens", 100, 8000, 400, key="max_tokens")
+
+        st.write("## Retrieval Settings")
+        st.write("Feel free to change these anytime")
+        st.slider("Number of Context Documents", 2, 20, 2, key="num_context_docs")
+        st.slider("Distance Threshold", .1, .9, .5, key="distance_threshold", step=.1)
+
+        st.write("## App Settings")
+        st.button("Clear Chat", key="clear_chat", on_click=lambda: st.session_state['messages'].clear())
+        st.button("Clear Cache", key="clear_cache", on_click=clear_cache)
+        st.button("New Conversation", key="reset", on_click=reset_app)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.title("Arxiv ChatGuru")
+        st.write("**Put in a topic area and a question within that area to get an answer!**")
+        topic = st.text_input("Topic Area", key="arxiv_topic")
+        papers = st.number_input("Number of Papers", key="num_papers", value=10, min_value=1, max_value=50, step=2)
+    with col2:
+        st.image("./assets/arxivguru_crop.png")
+
+
+
+    if st.button("Chat!"):
+        if is_updated(topic):
+            st.session_state['previous_topic'] = topic
+            with st.spinner("Loading information from Arxiv to answer your question..."):
+                create_arxiv_index(st.session_state['arxiv_topic'], st.session_state['num_papers'], prompt)
+
+    arxiv_db = st.session_state['arxiv_db']
+    if st.session_state["llm"] is None:
+        tokens = st.session_state["max_tokens"]
+        st.session_state["llm"] = get_llm(max_tokens=tokens)
+    try:
+        standalone_question_chain = get_conversation_chain(query_llm, conversation_template)
+        reader, answer = get_reader_chain(llm, reader_template, retriever)
+        chain = loaded_memory | standalone_question_chain | reader | answer
+        st.session_state['chain'] = chain
+    except AttributeError:
+        st.info("Please enter a topic area")
+        st.stop()
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if query := st.chat_input("What do you want to know about this topic?"):
+        st.session_state.messages.append({"role": "user", "content": query})
+        with st.chat_message("user"):
+            st.markdown(query)
+
+        with st.chat_message("assistant", avatar="./assets/arxivguru_crop.png"):
+            message_placeholder = st.empty()
+            st.session_state['context'], st.session_state['response'] = [], ""
+            chain = st.session_state['chain']
+
+            result = chain({"query": query})
+            st.markdown(result["result"])
+            st.session_state['context'], st.session_state['response'] = result['source_documents'], result['result']
+            if st.session_state['context']:
+                with st.expander("Context"):
+                    context = defaultdict(list)
+                    for doc in st.session_state['context']:
+                        context[doc.metadata['Title']].append(doc)
+                    for i, doc_tuple in enumerate(context.items(), 1):
+                        title, doc_list = doc_tuple[0], doc_tuple[1]
+                        st.write(f"{i}. **{title}**")
+                        for context_num, doc in enumerate(doc_list, 1):
+                            st.write(f" - **Context {context_num}**: {doc.page_content}")
+
+            st.session_state.messages.append({"role": "assistant", "content": st.session_state['response']})
+
+
+setup_ui()
