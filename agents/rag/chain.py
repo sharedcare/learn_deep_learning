@@ -47,10 +47,10 @@ def read_pdf(file_path):
     return pages
 
 
-def read_docs(arxiv_query: str):
+def read_docs(arxiv_query: str, num_docs: int = 10):
     raw_docs = ArxivLoader(query=arxiv_query,
-                       load_max_docs=10,
-                       load_all_available_meta=True).load()
+                           load_max_docs=num_docs,
+                           load_all_available_meta=True).load()
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=100,
@@ -72,6 +72,22 @@ def get_vector_db(docs):
     # FAISS vector database converts the chunks using the embeddings_model
     db = FAISS.from_documents(docs, embeddings)
     return db
+
+
+def get_llms(max_tokens: int = 512):
+    query_llm = ChatOpenAI(
+        model=os.getenv("MODEL_NAME"),
+        temperature=0.0,
+        model_kwargs={"stop": ["<|eot_id|>"]},
+    )
+    llm = ChatOpenAI(
+        model=os.getenv("MODEL_NAME"),
+        temperature=0.2,
+        max_tokens=max_tokens,
+        model_kwargs={"stop": ["<|eot_id|>"]},
+    )
+
+    return query_llm, llm
 
 
 def get_conversation_chain(llm, template):
