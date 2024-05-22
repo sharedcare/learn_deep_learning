@@ -25,7 +25,7 @@ def reset_app():
 
     db = st.session_state["db"]
     if db is not None:
-        ...
+        clear_cache()
         st.session_state["db"] = None
 
 
@@ -47,7 +47,7 @@ def setup_ui():
     set_llm_cache(create_llm_cache())
     # get prompt template
     # init memory
-    loaded_memory = ConversationBufferMemory(
+    memory = ConversationBufferMemory(
         return_messages=True, output_key="answer", input_key="question"
     )
 
@@ -124,8 +124,14 @@ def setup_ui():
         tokens = st.session_state["max_tokens"]
         st.session_state["query_llm"], st.session_state["llm"] = get_llms(max_tokens=tokens)
     try:
-        standalone_question_chain = get_conversation_chain(query_llm, CONVERSATION_TEMPLATE)
-        reader, answer = get_reader_chain(llm, READER_TEMPLATE, retriever)
+        # DEFINING RETRIEVER
+        retriever = db.as_retriever()
+        # load the memory to access chat history
+        loaded_memory = RunnablePassthrough.assign(
+            chat_history=RunnableLambda(memory.load_memory_variables) | itemgetter("history"),
+        )
+        standalone_question_chain = get_conversation_chain(st.session_state["query_llm"], CONVERSATION_TEMPLATE)
+        reader, answer = get_reader_chain(st.session_state["llm"], READER_TEMPLATE, retriever)
         chain = loaded_memory | standalone_question_chain | reader | answer
         st.session_state['chain'] = chain
     except AttributeError:
@@ -145,10 +151,23 @@ def setup_ui():
             message_placeholder = st.empty()
             st.session_state['context'], st.session_state['response'] = [], ""
             chain = st.session_state['chain']
+            inputs = {"question": query}
+            full_response = {}
+            answer = ""
+            for chunk in chain.stream(inputs):
+                for key in chunk:
+                    if key not in full_response:
+                        full_response[key] = chunk[key]
+                    else:
+                        full_response[key] += chunk[key]
+                    if key == 'answer':
+                        answer += chunk[key].content
+                        with message_placeholder.container():
+                            st.markdown(answer)
 
-            result = chain({"query": query})
-            st.markdown(result["result"])
-            st.session_state['context'], st.session_state['response'] = result['source_documents'], result['result']
+            # save the current question and answer to memory as chat history
+            memory.save_context(inputs, {"answer": answer})
+            st.session_state['context'], st.session_state['response'] = full_response['docs'], answer
             if st.session_state['context']:
                 with st.expander("Context"):
                     context = defaultdict(list)
