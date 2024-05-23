@@ -11,11 +11,11 @@ def create_llm_cache():
 
 
 @st.cache_resource
-def create_vector_db(arxiv_query: str, num_docs: int) -> FAISS:
+def create_vector_db(arxiv_query: str, num_docs: int):
     docs = read_docs(arxiv_query, num_docs)
     db = get_vector_db(docs)
     st.session_state["db"] = db
-    return db
+    return docs
 
 
 def reset_app():
@@ -99,15 +99,21 @@ def setup_ui():
         st.write("## LLM Settings")
         ##st.write("### Prompt") TODO make possible to change prompt
         st.write("Change these before you run the app!")
-        st.slider("Number of Tokens", 100, 8000, 400, key="max_tokens")
+        st.slider("Number of Tokens", 100, 8192, 512, key="max_tokens")
 
         st.write("## App Settings")
-        st.button("Clear Chat", key="clear_chat", on_click=lambda: st.session_state['messages'].clear())
+        st.button(
+            "Clear Chat",
+            key="clear_chat",
+            on_click=lambda: st.session_state["messages"].clear(),
+        )
         st.button("Clear Cache", key="clear_cache", on_click=clear_cache)
         st.button("New Conversation", key="reset", on_click=reset_app)
 
     st.title("Arxiv Chat")
-    st.write("**Put in a topic area and a question within that area to get an answer!**")
+    st.write(
+        "**Put in a topic area and a question within that area to get an answer!**"
+    )
     topic = st.text_input("Topic Area", key="arxiv_topic")
     num_docs = st.number_input(
         "Number of Pages", key="num_docs", value=10, min_value=1, max_value=50, step=2
@@ -117,23 +123,41 @@ def setup_ui():
         # if is_updated(topic):
         #     st.session_state['previous_topic'] = topic
         with st.spinner("Loading information from Arxiv to answer your question..."):
-            create_vector_db(st.session_state['arxiv_topic'], st.session_state['num_docs'])
+            docs = create_vector_db(
+                st.session_state["arxiv_topic"], st.session_state["num_docs"]
+            )
+            with st.expander("References"):
+                references = defaultdict(list)
+                for doc in docs:
+                    references[doc.metadata["Title"]].append(doc)
+                for i, doc_tuple in enumerate(references.items(), 1):
+                    title, doc_list = doc_tuple[0], doc_tuple[1]
+                    st.write(
+                        f"{i}. [**{title}**]({doc_list[0].metadata['links'][0]}) - *{doc_list[0].metadata['Authors']}*({doc_list[0].metadata['Published']})"
+                    )
 
     db = st.session_state["db"]
     if st.session_state["query_llm"] is None or st.session_state["llm"] is None:
         tokens = st.session_state["max_tokens"]
-        st.session_state["query_llm"], st.session_state["llm"] = get_llms(max_tokens=tokens)
+        st.session_state["query_llm"], st.session_state["llm"] = get_llms(
+            max_tokens=tokens
+        )
     try:
         # DEFINING RETRIEVER
         retriever = db.as_retriever()
         # load the memory to access chat history
         loaded_memory = RunnablePassthrough.assign(
-            chat_history=RunnableLambda(memory.load_memory_variables) | itemgetter("history"),
+            chat_history=RunnableLambda(memory.load_memory_variables)
+            | itemgetter("history"),
         )
-        standalone_question_chain = get_conversation_chain(st.session_state["query_llm"], CONVERSATION_TEMPLATE)
-        reader, answer = get_reader_chain(st.session_state["llm"], READER_TEMPLATE, retriever)
+        standalone_question_chain = get_conversation_chain(
+            st.session_state["query_llm"], CONVERSATION_TEMPLATE
+        )
+        reader, answer = get_reader_chain(
+            st.session_state["llm"], READER_TEMPLATE, retriever
+        )
         chain = loaded_memory | standalone_question_chain | reader | answer
-        st.session_state['chain'] = chain
+        st.session_state["chain"] = chain
     except AttributeError:
         st.info("Please enter a topic area")
         st.stop()
@@ -149,8 +173,8 @@ def setup_ui():
 
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
-            st.session_state['context'], st.session_state['response'] = [], ""
-            chain = st.session_state['chain']
+            st.session_state["context"], st.session_state["response"] = [], ""
+            chain = st.session_state["chain"]
             inputs = {"question": query}
             full_response = {}
             answer = ""
@@ -160,26 +184,33 @@ def setup_ui():
                         full_response[key] = chunk[key]
                     else:
                         full_response[key] += chunk[key]
-                    if key == 'answer':
+                    if key == "answer":
                         answer += chunk[key].content
                         with message_placeholder.container():
                             st.markdown(answer)
 
             # save the current question and answer to memory as chat history
             memory.save_context(inputs, {"answer": answer})
-            st.session_state['context'], st.session_state['response'] = full_response['docs'], answer
-            if st.session_state['context']:
+            st.session_state["context"], st.session_state["response"] = (
+                full_response["docs"],
+                answer,
+            )
+            if st.session_state["context"]:
                 with st.expander("Context"):
                     context = defaultdict(list)
-                    for doc in st.session_state['context']:
-                        context[doc.metadata['Title']].append(doc)
+                    for doc in st.session_state["context"]:
+                        context[doc.metadata["Title"]].append(doc)
                     for i, doc_tuple in enumerate(context.items(), 1):
                         title, doc_list = doc_tuple[0], doc_tuple[1]
                         st.write(f"{i}. **{title}**")
                         for context_num, doc in enumerate(doc_list, 1):
-                            st.write(f" - **Context {context_num}**: {doc.page_content}")
+                            st.write(
+                                f" - **Context {context_num}**: {doc.page_content}"
+                            )
 
-            st.session_state.messages.append({"role": "assistant", "content": st.session_state['response']})
+            st.session_state.messages.append(
+                {"role": "assistant", "content": st.session_state["response"]}
+            )
 
 
 setup_ui()
