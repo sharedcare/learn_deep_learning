@@ -17,8 +17,8 @@
 - [ ] DiT
 
 ## Generative Agents
-- [X] [Embodied AI](https://github.com/sharedcare/embodied_ai)
-- [ ] RAG
+- [x] [Embodied AI](https://github.com/sharedcare/embodied_ai)
+- [x] RAG
 
 ## Implementations with MLX
 
