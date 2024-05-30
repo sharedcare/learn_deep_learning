@@ -314,3 +314,4 @@ class Llama(nn.Module):
         out = self.output(hidden_states[:, -1, :]).astype(mx.float32)
         out = sample(out)
         yield out
+
