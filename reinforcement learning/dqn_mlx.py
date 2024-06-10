@@ -6,7 +6,6 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
-import copy
 import gym
 from mlx.core import array
 from collections import deque, namedtuple
@@ -64,6 +63,14 @@ class Net(nn.Module):
             ]
             self.layers[i].load_weights(weight)
 
+    def loss_fn(self, state: array, action: array, expected_state_action_values: array) -> array:
+        # Q(s_t, a): compute Q(s) and select taken actions as state action values
+        state_action_values = mx.take_along_axis(self(state), action, 1)
+        losses = nn.losses.smooth_l1_loss(
+            state_action_values.squeeze(1), expected_state_action_values
+        )
+        return losses
+
 
 class DQN:
     def __init__(
@@ -105,6 +112,8 @@ class DQN:
 
         self.steps_done = 0
 
+        mx.eval(self.policy_net.parameters())
+
     def save(self, path: str) -> None:
         """save policy model to designated path"""
         self.policy_net.save_weights(path)
@@ -123,7 +132,6 @@ class DQN:
         )
         self.steps_done += 1
         if random.random() > epsilon:
-            self.policy_net.eval()
             action_value = self.policy_net(obs)
             action = mx.argmax(action_value, 1)
             return mx.expand_dims(action, 0)
@@ -169,7 +177,7 @@ class DQN:
             )
             self.target_net.layers[i].load_weights([update_weight, update_bias])
 
-    def update(self) -> None:
+    def update(self) -> array:
         """update policy network"""
         if len(self.replay_buffer) < self.batch_size:
             return
@@ -187,9 +195,6 @@ class DQN:
         action_batch = mx.concatenate(batch.action)
         reward_batch = mx.concatenate(batch.reward)
 
-        # Q(s_t, a): compute Q(s) and select taken actions as state action values
-        state_action_values = mx.take_along_axis(self.policy_net(state_batch), action_batch, 1)
-
         # V(s_{t+1}): \max_a Q(s_{t+1}, a)
         next_state_values = mx.max(self.target_net(next_state_batch), 1)
 
@@ -197,14 +202,16 @@ class DQN:
         expected_state_action_values = reward_batch + self.gamma * next_state_values
 
         # TD error: Q(s_t, a) - Expected Q(s, a)
-        self.policy_net.train()
-        loss_fn = nn.losses.smooth_l1_loss
+        loss_fn = self.policy_net.loss_fn
         loss_and_grad_fn = nn.value_and_grad(self.policy_net, loss_fn)
         loss, grads = loss_and_grad_fn(
-            state_action_values.squeeze(1), expected_state_action_values
+            state_batch, action_batch, expected_state_action_values
         )
 
-        self.optimizer.update(self.policy_net, gradients=grads)
+        self.optimizer.update(self.policy_net, grads)
+        del grads
+        mx.eval(self.policy_net.parameters())
+        return loss
 
     def learn(self, num_episodes: int) -> None:
         """training process"""
@@ -219,15 +226,15 @@ class DQN:
                 next_state, action, reward, done = self.step(state)
                 episode_reward += reward.item()
                 state = next_state
-                self.update()
+                loss = self.update()
                 self.net_soft_update()
                 duration += 1
 
             episode_rewards.append(episode_reward)
             avg_score = np.mean(episode_rewards[-100:])
             print(
-                "step: {}, rew: {}, avg score: {}, duration: {}".format(
-                    i + 1, episode_reward, avg_score, duration + 1
+                "step: {}, rew: {:0f}, avg score: {:2f}, duration: {}, loss: {:5f}".format(
+                    i + 1, episode_reward, avg_score, duration + 1, loss.item() if loss else 0
                 )
             )
             plot_rewards(show_result=False, episode_rewards=episode_rewards)
@@ -276,6 +283,6 @@ if __name__ == "__main__":
         device=run_device,
     )
 
-    if LOAD_MODEL_PATH and os.path.exists(LOAD_MODEL_PATH):
-        dqn.load(LOAD_MODEL_PATH)
+    # if LOAD_MODEL_PATH and os.path.exists(LOAD_MODEL_PATH):
+    #     dqn.load(LOAD_MODEL_PATH)
     dqn.learn(NUM_EPISODES)
